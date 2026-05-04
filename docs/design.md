@@ -155,15 +155,18 @@ The `zarr_reader` module is the natural seam — it depends on [`zarrs`](https:/
 ### Bind phase
 
 1. Open the store with `zarrs` and read group metadata.
-2. Classify arrays as coordinates vs data variables. **Honor xarray's metadata first** — `_ARRAY_DIMENSIONS` (Zarr v2) and `dimension_names` (Zarr v3) — so we get the same coord/data split any xarray-produced store already encodes. Fall back to the "1D = coord, nD = data" heuristic only when that metadata is missing.
-3. Read the `coordinates` attribute on each data variable. xarray uses this to mark *non-dimension* coordinates — most commonly a 2D `lat(y, x) / lon(y, x)` mesh on satellite swath data, where the coordinate variable is itself nD. v1 cannot represent these as scalar columns; if encountered, error at bind with a clear message ("non-dimension coordinate `lat` has shape (1024, 1024); 2D coords are deferred"). 
-4. Group data variables by their dimension set. Each distinct dim set becomes a candidate output table. **Within a dim group, all selected variables must share the same chunk shape** — if `temperature` is chunked `[24, 10, 10]` and `humidity` is chunked `[1, 20, 20]`, the chunk plan in init can't enumerate one cartesian product that aligns both. We error at bind with a message that names the offending pair and tells the user to query them in separate `read_zarr` calls. (See decision 6.)
-5. Materialize coordinate arrays eagerly (they are 1D and small — ERA5 lat/lon/time fits in a few MB) so we have them for both schema metadata and later filter pruning. Coordinates are cached at the **store** level, keyed by array name. An `ATTACH` that mounts multiple views shares one cache, so `time` is loaded exactly once even if it appears in three groups.
-6. The `read_zarr` call resolves to exactly one dim group (via `dims :=`, the variables list, or — if unambiguous — the only group present); `ATTACH` materializes all of them as views, each with its own `BindData` but a shared coord cache.
-7. Build a DuckDB schema for the chosen group:
-   - one column per coordinate in that group, typed from its Zarr dtype
-   - one column per selected data variable, typed from its Zarr dtype
-8. Stash a `BindData` containing: store handle, chosen dim group, common chunk shape, projected columns, captured DuckDB `FileSystem` handle (see §Storage backends), and a reference to the store-level coord cache.
+2. Classify arrays as coordinates vs data variables. **Honor xarray's metadata first**, but read it from the right place — Zarr v2 puts `_ARRAY_DIMENSIONS` in `.zattrs` (per-array attrs), while Zarr v3 makes `dimension_names` a first-class field in the array's `zarr.json` metadata, *not* in attrs. The bind code must branch on format version: `zarrs` exposes the v3 field via `ArrayMetadataV3::dimension_names`. Falling through to attrs for v3 stores would silently miss the metadata on every array and degrade to the heuristic. Fall back to "1D = coord, nD = data" only when both metadata locations come up empty.
+3. Read the `coordinates` attribute on each data variable. xarray uses this to mark *non-dimension* coordinates — typically a 2D `lat(y, x) / lon(y, x)` mesh on satellite swath data, where the coord variable is itself nD. v1 cannot represent these as scalar columns; if encountered, error at bind ("non-dimension coordinate `lat` has shape (1024, 1024); 2D coords are deferred").
+4. Suppress CF metadata variables that aren't real data:
+   - **Bounds variables** (CF §7.1) — a coord with attrs like `time.attrs['bounds'] == 'time_bnds'` declares `time_bnds` as its cell-boundary descriptor. `time_bnds` then has shape `(N, 2)` and an extra `nbnds` dimension. Without filtering, `time_bnds` becomes a spurious dim group with one meaningless table — the `ersstv5` tutorial dataset triggers this exact case. Identification: parent coord has a `bounds` attribute pointing at the variable name. Fallback when the attr is missing: variable name matches `<dim>_bnds` / `<dim>_bounds` *and* shape is `(N, 2)`. Suppressed bounds are exposed in `read_zarr_metadata.attrs` on the parent coord, not as a top-level array.
+   - **Scalar (0-dim) coordinates** — ROMS-style stores attach physical constants as Zarr arrays with `shape = []` (e.g. `hc = critical depth`, `Vtransform = 2`). Including them as columns would repeat the same constant on every row; they're metadata, not data. Surface in `read_zarr_metadata.attrs` and exclude from the row schema. The schema-inference code must guard the strides computation against `shape = []` so bind doesn't panic.
+5. Group data variables by their dimension set. Each distinct dim set becomes a candidate output table. **Within a dim group, all selected variables must share the same chunk shape** — if `Tair` is chunked `[730, 13, 27]` and `dTdx` is chunked `[730, 7, 27]` (the `air_temperature_gradient` case — packed `int16` vs native `float32` produces different on-disk chunks), the chunk plan in init can't enumerate one cartesian product that aligns both. We error at bind with a message that names the offending pair, explains the common cause (packed-vs-native source storage, see §Type mapping > Packed integer decoding), and tells the user to query them in separate `read_zarr` calls. (See decision 6 — the v0.3 plan relaxes this restriction.)
+6. Materialize coordinate arrays eagerly (they are 1D and small — ERA5 lat/lon/time fits in a few MB) so we have them for both schema metadata and later filter pruning. Coordinates are cached at the **store** level, keyed by array name. An `ATTACH` that mounts multiple views shares one cache, so `time` is loaded exactly once even if it appears in three groups. **Unindexed dimensions** — dimensions that appear in a data variable's dim list but have no backing coordinate array (the `tiny` tutorial dataset has `dim_0(5)` with no `dim_0` array) — are handled by synthesizing a `0..N` integer range as the cached coord. The synthesis is one `arange` call at bind; the scan kernel doesn't need to know whether a coord came from disk or `arange`.
+7. The `read_zarr` call resolves to exactly one dim group (via `dims :=`, the variables list, or — if unambiguous — the only group present); `ATTACH` materializes all of them as views, each with its own `BindData` but a shared coord cache.
+8. Build a DuckDB schema for the chosen group:
+   - one column per coordinate in that group, typed from its Zarr dtype (or `INTEGER` for synthesized RangeIndex coords).
+   - one column per selected data variable, typed from its Zarr dtype — *unless* the variable carries `scale_factor` / `add_offset` attrs, in which case the output type is `DOUBLE` (or `FLOAT` if both attrs are `f4`) per §Type mapping > Packed integer decoding.
+9. Stash a `BindData` containing: store handle, chosen dim group, common chunk shape, projected columns *with per-column encoding tag* (plain / packed / range), the active CF sentinel per data variable (per §Type mapping > NULL masking precedence), captured DuckDB `FileSystem` handle (see §Storage backends), and a reference to the store-level coord cache.
 
 ### Init phase (chunk plan)
 
@@ -175,11 +178,12 @@ Filter pushdown (see below) prunes this list before it ever runs.
 
 For each work unit:
 
-1. Decode each selected data variable's chunk from `zarrs` into an `ndarray::ArrayD`. Sparse stores have **implicit chunks** — chunk keys with no backing storage object simply don't exist; `zarrs` returns a "chunk not found" error variant for these. We catch it and synthesize a fill-value chunk in place (every cell becomes `_FillValue` and therefore SQL `NULL`). Treating missing chunks as errors would break sparse satellite-swath data and is wrong by Zarr spec.
+1. Decode each selected data variable's chunk from `zarrs` into an `ndarray::ArrayD`. Sparse stores have **implicit chunks** — chunk keys with no backing storage object simply don't exist; `zarrs` returns a "chunk not found" error variant for these. We catch it and synthesize a fill-value chunk using the **zarr-level `fill_value`** from `zarr.json` (distinct from the CF-level `_FillValue` attr — see §Type mapping > NULL masking precedence). Cells matching the CF-level sentinel still flow through the masking step in (3) and become SQL `NULL`. Treating missing chunks as errors would break sparse satellite-swath data and is wrong by Zarr spec.
 2. Compute the row-major iteration order over the chunk's logical extent.
-3. Fill DuckDB's output `DataChunk` by:
-   - emitting coordinate columns as dictionary vectors sliced from the cached coord arrays (or flat vectors if dictionary construction isn't exposed by `duckdb-rs` — see Implementability risks)
-   - emitting data columns by reading the ndarray buffer in row-major order
+3. Fill DuckDB's output `DataChunk`. The exact transform per data column depends on the variable's encoding tag (set at bind time):
+   - **Plain numeric/string variable** — copy `data_arrays[v][row_start..row_end]` into the output flat vector. While copying, mask cells whose raw value equals the active CF sentinel (`_FillValue` or `missing_value`, per §Type mapping > NULL masking precedence) by clearing the validity bit.
+   - **Packed integer variable** (carries `scale_factor`/`add_offset` attrs) — three steps per cell, in this order, per CF §8.1: (a) compare raw integer to the active sentinel; if match, clear validity bit and skip; (b) compute `decoded = raw * scale_factor + add_offset` as `f64`; (c) cast to the bind-time output type (`DOUBLE`/`FLOAT`) and write. Mask-before-decode is mandatory: applying `scale * sentinel + offset` first would shift the sentinel and the equality check would miss.
+   - **Coordinate column** — emit as dictionary vector sliced from the cached coord arrays (or flat vector if `duckdb-rs` doesn't expose dictionary construction — see Implementability risks). For unindexed dimensions (no backing coord array — see §Bind phase), `coord_values[k]` is a synthesized `0..s_k` integer range computed at bind, and the gather step treats it identically to a real coord.
 4. Yield up to `STANDARD_VECTOR_SIZE` (2048) rows at a time; resume on the next call.
 
 The local scan state holds the current chunk's decoded buffers and a cursor; the global init state holds the immutable work-unit list. This matches DuckDB's morsel-driven model and gives us free intra-query parallelism.
@@ -193,7 +197,7 @@ The "pivot" is the heart of this extension: the operation that turns a decoded N
 For one work unit (one chunk-index tuple within one dim group):
 
 - **`shape`** — the chunk's logical shape `(s₀, s₁, …, s_{D-1})` in the dim group's canonical order. ERA5 surface chunk: `shape = (24, 10, 10)` over `(time, lat, lon)`.
-- **`coord_values[k]`** — the 1-D slice of the k-th dimension's coordinate array covering this chunk (length `s_k`). Read once at bind into the store-level cache, then sliced per chunk by index.
+- **`coord_values[k]`** — the 1-D slice of the k-th dimension's coordinate array covering this chunk (length `s_k`). Read once at bind into the store-level cache, then sliced per chunk by index. For unindexed dims (a dim that appears in a data variable's dim list but has no backing coord array), `coord_values[k]` is synthesized at bind as `arange(0, s_k)` — see §Bind phase. The kernel doesn't care which form a coord came from.
 - **`data_arrays[v]`** — the decoded chunk for each selected data variable, one `ndarray::ArrayD<T_v>` per variable, total size `prod(shape)`. After `zarrs` decode the buffer is C-contiguous, so a flat `ArrayView1<T_v>` is a zero-copy view.
 
 The chunk holds `total_rows = prod(shape)` logical rows. For an ERA5 surface chunk that's `24 × 10 × 10 = 2,400`.
@@ -218,7 +222,7 @@ For each `DataChunk` covering rows `[row_start, row_end)`:
 1. Build a row-index range `i = row_start..row_end`.
 2. For each output column in schema order:
    - **Coordinate column k** — compute `coord_idx[i] = (i / strides[k]) % shape[k]`, then gather `coord_values[k][coord_idx[i]]` into the output flat vector. Optionally emit as a DuckDB dictionary vector keyed by `coord_values[k]` (open question — see Implementability risks); the dictionary form skips the gather and just writes indices.
-   - **Data-variable column v** — copy the slice `data_arrays[v][row_start..row_end]` into the output flat vector. Zero-copy where DuckDB's vector layout permits, `memcpy` otherwise.
+   - **Data-variable column v** — copy the slice `data_arrays[v][row_start..row_end]` into the output flat vector. Zero-copy where DuckDB's vector layout permits, `memcpy` otherwise. For *packed* and *NULL-masked* encodings the copy becomes a transform — see §Scan phase > step 3 for the exact pipeline.
 3. Apply `_FillValue` masking: any cell whose raw value equals the array's `_FillValue` becomes SQL `NULL` via the DataChunk validity bitmap.
 
 The data-variable copy is where the bytes move; coord gathers are negligible since coords are 1-D and tiny.
@@ -257,21 +261,50 @@ xarray-sql's `_block_metadata` computes per-partition `(min, max)` for each dim 
 
 ## Type mapping
 
-| Zarr dtype           | DuckDB type                  | Notes                                          |
-| -------------------- | ---------------------------- | ---------------------------------------------- |
-| `i1/i2/i4/i8`        | `TINYINT`..`BIGINT`          |                                                |
-| `u1/u2/u4/u8`        | `UTINYINT`..`UBIGINT`        |                                                |
-| `f4/f8`              | `FLOAT`/`DOUBLE`             | NaN preserved                                  |
-| `bool`               | `BOOLEAN`                    |                                                |
-| `M8[ns]` / `M8[us]`  | `TIMESTAMP_NS` / `TIMESTAMP` | native NumPy datetimes; mapped directly        |
-| CF-encoded int time  | `BIGINT`                     | exposed raw; CF decoding deferred (see Later)  |
-| `S<n>` (fixed bytes) | `BLOB`                       |                                                |
-| `U<n>` (UTF-32)      | `VARCHAR`                    | decoded                                        |
-| structured / object  | unsupported v1               | error at bind                                  |
+The base dtype mapping is mechanical:
 
-`_FillValue` from `.zattrs`/`zarr.json` is honored: matching cells become SQL `NULL`. CF time conventions (encoded `int64` + `units`/`calendar` attributes) are exposed raw; decoding is on the deferred list (see Phased plan / Later and decision 3 below). Stores that use native NumPy datetime dtypes pass through unchanged.
+| Zarr dtype                         | DuckDB type                              | Notes                                       |
+| ---------------------------------- | ---------------------------------------- | ------------------------------------------- |
+| `i1/i2/i4/i8`                      | `TINYINT`..`BIGINT`                      |                                             |
+| `u1/u2/u4/u8`                      | `UTINYINT`..`UBIGINT`                    |                                             |
+| `f4/f8`                            | `FLOAT`/`DOUBLE`                         | NaN preserved                               |
+| `bool`                             | `BOOLEAN`                                |                                             |
+| `M8[ns]` / `M8[us]`                | `TIMESTAMP_NS` / `TIMESTAMP`             | native NumPy datetimes; mapped directly     |
+| CF-encoded time (`f4/f8/i4/i8`)    | `FLOAT`/`DOUBLE`/`INTEGER`/`BIGINT`      | raw on-disk dtype; CF decoding deferred     |
+| `S<n>` (fixed bytes)               | `BLOB`                                   |                                             |
+| `U<n>` (UTF-32)                    | `VARCHAR`                                | decoded                                     |
+| structured / object                | unsupported v1                           | error at bind                               |
 
-**Endianness:** Zarr dtypes carry an explicit byte-order marker (`<f4` little-endian, `>f4` big-endian, `=f4` native). `zarrs` decodes both orientations into native-byte-order `ndarray` buffers, so the copy into DuckDB's `DataChunk` is a `memcpy` with no swap. Round-trip correctness is verified against a big-endian fixture — most modern hardware is little-endian, so the bug would otherwise only surface on legacy machines.
+CF-encoded time appears in real stores as `int32`, `int64`, `float32`, or `float64` depending on the source NetCDF — RASM uses `f8` + `noleap`, `air_temperature` uses `f4` + `gregorian`, ERA5-style stores use `i8`. We surface the raw on-disk dtype; decoding is deferred (see Phased plan / Later and decision 3). The `units` and `calendar` attrs ride along into `read_zarr_metadata.attrs` so users know what they're decoding against.
+
+### Packed integer decoding (CF §8.1)
+
+A data variable carrying `scale_factor` and/or `add_offset` attrs is *packed*: the on-disk integer is a quantization of a real-valued measurement. Real example from the `air_temperature_gradient` xarray tutorial dataset:
+
+```
+Tair: dtype=int16, attrs={scale_factor: 0.01, add_offset: 0.0}
+```
+
+Reading the raw `int16` and exposing it as DuckDB `SMALLINT` would produce `27315` where the user expects `273.15` — a silent correctness bug across roughly a third of real-world atmospheric data. We must decode at scan time:
+
+1. Read the raw integer chunk via `zarrs`.
+2. Mask sentinel cells (`_FillValue`, `missing_value`, or zarr `fill_value`) **on the raw integer values** — CF §8.1 mandates this order, because applying `scale * sentinel + offset` would shift the sentinel and the equality check would miss.
+3. For non-NULL cells, apply `value * scale_factor + add_offset` and emit the decoded value.
+4. Output column type is `DOUBLE` (or `FLOAT` if both `scale_factor` and `add_offset` are `f4`) — never the on-disk integer type. Bind overrides the type mapping for any variable carrying these attrs.
+
+### NULL masking precedence
+
+`_FillValue` and `missing_value` are both used as masking sentinels in real Zarr stores; CF §2.5.1 documents both. They coexist and have separate semantics — the `basin_mask` tutorial dataset has `missing_value = -100` with no `_FillValue`, so checking only `_FillValue` would silently leak the sentinel into query results. Bind resolves the active sentinel for each variable in this order:
+
+1. `_FillValue` from attrs, if present.
+2. Otherwise `missing_value` from attrs, if present.
+3. Otherwise no CF-level NULL masking.
+
+This is **separate** from the array-level `fill_value` in `zarr.json`, which controls what an *implicit* (missing) chunk decodes to (see Scan phase). Conflating the two corrupts both behaviors: `fill_value` is for chunks that don't exist on disk; `_FillValue` / `missing_value` is for sentinel cells within decoded chunks.
+
+### Endianness
+
+Zarr dtypes carry an explicit byte-order marker (`<f4` little-endian, `>f4` big-endian, `=f4` native). `zarrs` decodes both orientations into native-byte-order `ndarray` buffers, so the copy into DuckDB's `DataChunk` is a `memcpy` with no swap. Round-trip correctness is verified against a big-endian fixture — most modern hardware is little-endian, so the bug would otherwise only surface on legacy machines.
 
 ## Storage backends
 
@@ -313,9 +346,9 @@ Filters on data variables cannot be pushed (Zarr is dense, no chunk-level statis
 ## Phased plan
 
 0. **Spike (v0.0)** — verify what `duckdb-rs` exposes (or doesn't) for replacement-scan registration, storage-extension `ATTACH` hooks, dictionary-vector construction, and extension-config-variable registration. Outcome: a short note appended to this design doc and any bootstrap adjustments. The spike gates the work that depends on those APIs (v0.2 onward); v0.1 MVP can begin in parallel since it only needs the table-function and scalar APIs `duckdb-rs` definitely supports.
-1. **MVP (v0.1)** — local-filesystem only, Zarr v3, `read_zarr` + `read_zarr_metadata` + `read_zarr_groups`, single dim group only, no pushdown beyond projection. Goal: end-to-end demo with the synthetic dataset zarr-datafusion ships with.
+1. **MVP (v0.1)** — local-filesystem only, Zarr v3, `read_zarr` + `read_zarr_metadata` + `read_zarr_groups`, single dim group only, no pushdown beyond projection. Includes packed-integer decoding (`scale_factor` / `add_offset`) and full NULL masking precedence (`_FillValue` → `missing_value` → none) — both are correctness, not optimizations. Goal: end-to-end demo against the xarray tutorial datasets in `test/fixtures/xarray_tutorial/`.
 2. **v0.2** — Zarr v2 + Blosc/LZ4 codecs (free with `zarrs`), replacement scan, dictionary coord columns *(if exposed by `duckdb-rs`)*, type mapping for native datetime/string dtypes.
-3. **v0.3** — Multi-group stores via `ATTACH ... (TYPE ZARR)`; coordinate-range filter pushdown; parallel scan; statistics. This is where we should beat naive `xarray + pandas` (with dask, on the same thread budget) on a real ERA5 query. Benchmark must capture chunks-decoded vs total chunks, not just wall-clock.
+3. **v0.3** — Multi-group stores via `ATTACH ... (TYPE ZARR)`; coordinate-range filter pushdown; parallel scan; statistics; **coarsest-grid chunk planning** (relaxes decision 6's uniform-chunk requirement now that the scan engine is being reworked anyway). Goal: beat naive `xarray + pandas` (with dask, on the same thread budget) on a real ERA5 query. Benchmark must capture chunks-decoded vs total chunks, not just wall-clock.
 4. **v0.4** — Remote stores via DuckDB filesystem FFI, secrets integration, community-extension submission.
 5. **Later** — CF time UDFs (deferred until a permissively-licensed implementation path exists; nice-to-have, not blocking), chunk-level statistics (when present), aggregate pushdown, write support, 2D non-dimension coordinates, async `zarrs` if remote latency demands it.
 
@@ -367,9 +400,15 @@ CF-encoded time (e.g. `int64` + `units = "hours since 1970-01-01"` + `calendar =
 
 Within a dim group, two data variables might be chunked differently — e.g. `temperature[24,10,10]` and `humidity[1,20,20]`, both over `(time, lat, lon)`. The init phase enumerates a single cartesian product of chunk indices and so cannot align both grids without finer-grained iteration. Three options: (a) require uniform chunk shape per dim group, error at bind on mismatch; (b) plan against the coarsest chunk grid and re-read finer-chunked variables multiple times per work unit; (c) iterate at the row level rather than the chunk level.
 
-> **Decision:** (a) — require uniform chunk shape across all selected variables in a dim group. The bind phase checks this and fails with a message naming the offending pair plus the workaround (`read_zarr('store.zarr', variables := ['humidity'])`).
+> **Decision (v1):** (a) — require uniform chunk shape across all selected variables in a dim group. Bind checks and fails with a message naming the offending pair, explaining the common cause (packed `int16` vs native `float32` storage from the source NetCDF), and pointing at the workaround (`read_zarr('store.zarr', variables := ['humidity'])`).
 >
-> **Rationale:** xarray writes uniform chunks across data variables sharing dims by default, so this restriction will rarely be observed in practice. Option (b) doubles implementation complexity for a perf benefit that mostly hits stores nobody actually has. Option (c) defeats the parallel-scan model entirely. Forcing uniform chunks now keeps v1 small and gives us an unambiguous escape hatch via `variables :=` when a real user does hit the case.
+> **Empirical correction:** the original framing said this would "rarely be observed in practice." That was wrong. The `air_temperature_gradient` xarray tutorial dataset (NCEP reanalysis — same provenance as ERA5) has `Tair` chunked `[730, 13, 27]` while `dTdx`/`dTdy` share dims but are chunked `[730, 7, 27]`, because xarray preserves source-NetCDF chunking per variable and packed-vs-native storage routinely produces different chunks. This is common in atmospheric reanalysis stores, not exotic.
+>
+> **Rationale:** Option (a) is still right for v1 — it's correct, the implementation is one comparison at bind, and it forces the user toward an explicit query that does work. The bind error is ergonomically painful when it fires often, but the alternatives are heavier than they look:
+> - Option (b) — coarsest-grid plan — means each work unit re-reads finer-chunked variables N times (once per finer chunk that fits inside the coarse cell). That doubles the scan engine's complexity and breaks the "one chunk decoded per work unit" invariant the rest of the pivot kernel rests on.
+> - Option (c) — row-level iteration — defeats the parallel-scan model entirely.
+>
+> Option (b) is queued for v0.3 alongside the multi-group `ATTACH` work, where the scan engine is being touched anyway. v1 ships the bind-error path; v0.3 relaxes it.
 
 ## Why this is worth building
 
