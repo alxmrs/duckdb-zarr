@@ -18,6 +18,18 @@ A design for `duckdb-zarr` — a Rust DuckDB extension that lets users query Zar
 - Custom codecs beyond what `zarrs` already supports.
 - WebAssembly. The current scaffold ships a `wasm_lib.rs` target; it is not a supported build because `zarrs` and `ndarray` use threading and I/O patterns that don't trivially compile to `wasm32`. 
 
+## Future integration boundaries (deferred)
+
+Three integration targets come up whenever a Zarr reader ships in the Pangeo orbit: IceChunk, VirtualiZarr/Kerchunk, and Substrait. None are in scope for v0.1–v0.4. This section names each so future contributors aren't surprised by the gap, and is deliberate about *not* designing the seam upfront for them. Three integrations with three very different shapes can't share one general abstraction without producing one that's wrong for all three.
+
+**IceChunk** (Git-like versioning over a Zarr-compatible repository). The only viable Rust path is `zarrs_icechunk`, which is async-only and exposes a Repository + Session model rather than the open-a-path model of plain Zarr. Adding IceChunk would require (a) an async-aware boundary at the `zarr_reader` seam, breaking decision 5; (b) snapshot / branch identifiers on the SQL surface — named arguments on `read_zarr` and `ATTACH` would absorb this without breaking the existing API; (c) a probe step in the replacement scan to distinguish IceChunk repos from plain Zarr roots. None of this is started.
+
+**VirtualiZarr / Kerchunk** (Zarr-shaped views over archival NetCDF/HDF5/GRIB2). The chunk manifest lives at the Zarr path but the actual chunk bytes live in a foreign URL. The current storage adapter is "key → DuckDB filesystem at `store_root + '/' + key`" — wrong shape for virtual chunks, which need "key → manifest lookup → byte-range fetch from a different URL." Compounding this, virtual chunks usually point into HDF5/NetCDF/GRIB2 files whose internal compression is *not* a Zarr codec, so the non-goal "no custom codecs beyond `zarrs`" excludes most archival VirtualiZarr stores by construction. The only Rust ecosystem path today is IceChunk-backed VirtualiZarr (Kerchunk JSON/Parquet has no Rust parser), so VirtualiZarr is doubly gated on IceChunk landing first.
+
+**Substrait** (cross-engine query plan exchange). DuckDB's separate `substrait` community extension serializes plans, but a `read_zarr(...)` call serializes as a DuckDB-specific extension function that no other engine can execute. The `ATTACH ... (TYPE ZARR)` path is closer to Substrait-friendly because it presents the Zarr store as a named table — Substrait's `ReadRel` references a table by name, which a hypothetical DataFusion-side reader could resolve through a shared catalog. We're not designing for Substrait, but the existence of the `ATTACH` form means we're not painting ourselves into a corner either.
+
+The `zarr_reader` seam (§Architecture) is correct for plain Zarr v2/v3 today. None of these three integrations fit through it without modification. That's by design — getting plain Zarr right is the v1 product, and a seam pre-shaped for three speculative integrations would be wrong-shaped for all three. The seam stays small; future work re-evaluates it then, with concrete user evidence.
+
 ## Implementability risks (open spike)
 
 The pinned `duckdb` crate (`=1.10502.0`) exposes the VTab (table-function) and scalar-function APIs we lean on in v0.1, but it is not yet established that it exposes (a) replacement-scan registration, (b) storage-extension `ATTACH` hooks, (c) custom dictionary-vector construction, or (d) extension-config-variable registration. If any are missing from the Rust binding, the affected feature falls back to a coarser API, ships behind raw FFI into the DuckDB C API, or moves to "Later."
