@@ -30,11 +30,21 @@ Three integration targets come up whenever a Zarr reader ships in the Pangeo orb
 
 The `zarr_reader` seam (§Architecture) is correct for plain Zarr v2/v3 today. None of these three integrations fit through it without modification. That's by design — getting plain Zarr right is the v1 product, and a seam pre-shaped for three speculative integrations would be wrong-shaped for all three. The seam stays small; future work re-evaluates it then, with concrete user evidence.
 
-## Implementability risks (open spike)
+## Implementability risks (spike resolved 2026-05-04)
 
-The pinned `duckdb` crate (`=1.10502.0`) exposes the VTab (table-function) and scalar-function APIs we lean on in v0.1, but it is not yet established that it exposes (a) replacement-scan registration, (b) storage-extension `ATTACH` hooks, (c) custom dictionary-vector construction, or (d) extension-config-variable registration. If any are missing from the Rust binding, the affected feature falls back to a coarser API, ships behind raw FFI into the DuckDB C API, or moves to "Later."
+The pinned `duckdb` crate (`=1.10502.0`) exposes the `VTab` trait (bind/init/func) and scalar-function registration that v0.1 requires. Below are the resolved findings for the four APIs that were open questions:
 
-A short spike maps each design entry point to the concrete `duckdb-rs` symbol it requires. The spike gates the work that depends on those APIs (v0.2 onward); the v0.1 MVP can move forward in parallel — the table-function bind/init/scan path and the schema/reader code only need APIs `duckdb-rs` definitely supports.
+**(a) Replacement-scan registration** — `Connection::register_replacement_scan` does **not** exist in duckdb-rs. However, `libduckdb-sys` (the underlying C FFI layer that ships with the crate) exposes `duckdb_add_replacement_scan`, `duckdb_replacement_scan_set_function_name`, `duckdb_replacement_scan_add_parameter`, and `duckdb_replacement_scan_set_error`. Replacement scan for `.zarr` path interception lands behind a thin `unsafe` FFI wrapper calling these symbols directly. This unblocks the v0.2 work.
+
+**(b) ATTACH / storage-extension hooks** — `duckdb_register_storage_extension` is **absent** from `libduckdb-sys`. ATTACH as a proper storage engine is not achievable via the C extension API at this version. The v0.3 ATTACH milestone must use a different mechanism — most likely a macro-style shim (a SQL `ATTACH` wrapper that mounts each dimension group as a named view). This weakens the ATTACH UX slightly (no native `FROM zarr.temperature`) but keeps the rest of the design intact.
+
+**(c) Dictionary-vector construction** — `duckdb_create_dictionary_vector` is **absent**. Coordinate columns are emitted as flat `FlatVector` values gathered from the cached coord array; the dictionary-encoding optimization is off the table. Correctness is unchanged; memory use per scan is higher for high-cardinality coord columns (rare in practice — time and lat/lon coords repeat heavily within a chunk but the duplication is at the chunk-buffer level, not the SQL vector level).
+
+**(d) Extension config-variable registration** — `duckdb_register_config_option`, `duckdb_create_config_option`, `duckdb_config_option_set_{name,description,type,default_value,default_scope}`, and `duckdb_client_context_get_config_option` are **all present** in `libduckdb-sys`. `SET zarr_chunk_cache_mb = 512` lands behind a thin FFI wrapper; the setting is readable from `InitInfo` via the client context pointer.
+
+**(e) Predicate filter pushdown** — `duckdb_bind_get_filter` and `duckdb_table_function_set_pushdown_filter` are **absent**. DuckDB will evaluate `WHERE lat > 30` by scanning all rows and filtering post-scan. Filter pushdown remains a v0.3 item; if the C API exposes a path at that point it can be added, otherwise the optimizer handles it outside the scan.
+
+**(f) Projection pushdown** — `duckdb_table_function_supports_projection_pushdown`, `duckdb_init_get_column_count`, and `duckdb_init_get_column_index` are **present** in `libduckdb-sys`. The high-level `VTab::supports_pushdown()` method (returns `false` by default) controls this on the duckdb-rs side. Both paths work; we use the high-level API for v0.1 (all columns, no pushdown), add projection pushdown in v0.2 when it reduces unnecessary coord materialization.
 
 ## The pivot, in DuckDB terms
 
@@ -50,7 +60,7 @@ A Zarr store with coordinates `lat(L)`, `lon(M)`, `time(T)` and data variables `
 
 Logical row count is `T × L × M`. The nD → 2D mapping is the same `ravel()`/metadata reshape that xarray-sql relies on: we never materialize the cartesian product in memory; we generate it row-major on the fly inside each chunk-sized scan.
 
-Coordinate columns within a single chunk are highly repetitive. *If* `duckdb-rs` exposes dictionary-vector construction (open question — see Implementability risks), we emit them as DuckDB dictionary vectors and capture the same memory-saving idea zarr-datafusion realizes through Arrow `DictionaryArray`. If it does not, coord columns fall back to flat vectors filled by indexing into the cached coord array; correctness is identical, the cost is more bytes per scan.
+Coordinate columns within a single chunk are highly repetitive. `duckdb-rs 1.10502.0` does not expose dictionary-vector construction (confirmed spike — see §Implementability risks), so coord columns are emitted as flat `FlatVector` values gathered from the cached coord array. Correctness is identical to the dictionary-encoding approach zarr-datafusion uses via Arrow `DictionaryArray`; the cost is more bytes per scan for high-cardinality coord columns, which in practice are rare since time/lat/lon repeat heavily within each chunk.
 
 ### One table per dimension group
 
@@ -195,7 +205,7 @@ For each work unit:
 3. Fill DuckDB's output `DataChunk`. The exact transform per data column depends on the variable's encoding tag (set at bind time):
    - **Plain numeric/string variable** — copy `data_arrays[v][row_start..row_end]` into the output flat vector. While copying, mask cells whose raw value equals the active CF sentinel (`_FillValue` or `missing_value`, per §Type mapping > NULL masking precedence) by clearing the validity bit.
    - **Packed integer variable** (carries `scale_factor`/`add_offset` attrs) — three steps per cell, in this order, per CF §8.1: (a) compare raw integer to the active sentinel; if match, clear validity bit and skip; (b) compute `decoded = raw * scale_factor + add_offset` as `f64`; (c) cast to the bind-time output type (`DOUBLE`/`FLOAT`) and write. Mask-before-decode is mandatory: applying `scale * sentinel + offset` first would shift the sentinel and the equality check would miss.
-   - **Coordinate column** — emit as dictionary vector sliced from the cached coord arrays (or flat vector if `duckdb-rs` doesn't expose dictionary construction — see Implementability risks). For unindexed dimensions (no backing coord array — see §Bind phase), `coord_values[k]` is a synthesized `0..s_k` integer range computed at bind, and the gather step treats it identically to a real coord.
+   - **Coordinate column** — gather from the cached coord arrays into a flat `FlatVector`. For unindexed dimensions (no backing coord array — see §Bind phase), `coord_values[k]` is a synthesized `0..s_k` integer range computed at bind, and the gather step treats it identically to a real coord. Dictionary-vector construction is not available in this crate version (see §Implementability risks).
 4. Yield up to `STANDARD_VECTOR_SIZE` (2048) rows at a time; resume on the next call.
 
 The local scan state holds the current chunk's decoded buffers and a cursor; the global init state holds the immutable work-unit list. This matches DuckDB's morsel-driven model and gives us free intra-query parallelism.
@@ -233,7 +243,7 @@ For each `DataChunk` covering rows `[row_start, row_end)`:
 
 1. Build a row-index range `i = row_start..row_end`.
 2. For each output column in schema order:
-   - **Coordinate column k** — compute `coord_idx[i] = (i / strides[k]) % shape[k]`, then gather `coord_values[k][coord_idx[i]]` into the output flat vector. Optionally emit as a DuckDB dictionary vector keyed by `coord_values[k]` (open question — see Implementability risks); the dictionary form skips the gather and just writes indices.
+   - **Coordinate column k** — compute `coord_idx[i] = (i / strides[k]) % shape[k]`, then gather `coord_values[k][coord_idx[i]]` into the output flat `FlatVector`. Dictionary-vector construction is not available (see §Implementability risks).
    - **Data-variable column v** — copy the slice `data_arrays[v][row_start..row_end]` into the output flat vector. Zero-copy where DuckDB's vector layout permits, `memcpy` otherwise. For *packed* and *NULL-masked* encodings the copy becomes a transform — see §Scan phase > step 3 for the exact pipeline.
 3. Apply `_FillValue` masking: any cell whose raw value equals the array's `_FillValue` becomes SQL `NULL` via the DataChunk validity bitmap.
 
@@ -328,7 +338,7 @@ DuckDB already speaks S3, GCS, Azure, and HTTP through its `httpfs` extension an
 
 `zarrs` is built around an abstract `ReadableStorageTraits` trait, so swapping in a DuckDB-backed store is a few hundred lines, not a fork.
 
-**Capturing the FileSystem handle.** DuckDB's `FileSystem` is owned by the `ClientContext` of the active connection, not by any global. We capture a handle to it during the bind callback (the `ClientContext` is one of the bind arguments DuckDB hands us), wrap it in an `Arc`, and stash it inside `BindData` next to the coord cache. The init and scan callbacks pull the handle out of `BindData` and clone the `Arc` into each thread's local state. The Rust storage adapter then forwards each `get(key)` and `get_partial(key, range)` call to the captured `FileSystem` over FFI — credentials, retries, and filesystem-level caching all stay inside DuckDB and don't get re-implemented here. The exact `duckdb-rs` symbols for grabbing the `FileSystem` from the `ClientContext` are part of the spike mentioned above.
+**Capturing the FileSystem handle.** DuckDB's `FileSystem` is owned by the `ClientContext` of the active connection, not by any global. We capture a handle to it during the bind callback (the `ClientContext` is one of the bind arguments DuckDB hands us), wrap it in an `Arc`, and stash it inside `BindData` next to the coord cache. The init and scan callbacks pull the handle out of `BindData` and clone the `Arc` into each thread's local state. The Rust storage adapter then forwards each `get(key)` and `get_partial(key, range)` call to the captured `FileSystem` over FFI — credentials, retries, and filesystem-level caching all stay inside DuckDB and don't get re-implemented here. The exact `duckdb-rs` symbols for grabbing the `FileSystem` from the `ClientContext` are confirmed during v0.4 implementation; the spike (§Implementability risks) did not cover this path since remote storage is a v0.4 concern.
 
 ## Predicate & projection pushdown
 
@@ -357,9 +367,9 @@ Filters on data variables cannot be pushed (Zarr is dense, no chunk-level statis
 
 ## Phased plan
 
-0. **Spike (v0.0)** — verify what `duckdb-rs` exposes (or doesn't) for replacement-scan registration, storage-extension `ATTACH` hooks, dictionary-vector construction, and extension-config-variable registration. Outcome: a short note appended to this design doc and any bootstrap adjustments. The spike gates the work that depends on those APIs (v0.2 onward); v0.1 MVP can begin in parallel since it only needs the table-function and scalar APIs `duckdb-rs` definitely supports.
+0. **Spike (v0.0, complete)** — verified what `duckdb-rs` exposes for replacement-scan registration, storage-extension `ATTACH` hooks, dictionary-vector construction, extension-config-variable registration, and predicate/projection pushdown. Findings recorded in §Implementability risks.
 1. **MVP (v0.1)** — local-filesystem only, Zarr v3, `read_zarr` + `read_zarr_metadata` + `read_zarr_groups`, single dim group only, no pushdown beyond projection. Includes packed-integer decoding (`scale_factor` / `add_offset`) and full NULL masking precedence (`_FillValue` → `missing_value` → none) — both are correctness, not optimizations. Goal: end-to-end demo against the xarray tutorial datasets in `test/fixtures/xarray_tutorial/`.
-2. **v0.2** — Zarr v2 + Blosc/LZ4 codecs (free with `zarrs`), replacement scan, dictionary coord columns *(if exposed by `duckdb-rs`)*, type mapping for native datetime/string dtypes.
+2. **v0.2** — Zarr v2 + Blosc/LZ4 codecs (free with `zarrs`), replacement scan (via `libduckdb-sys` FFI), projection pushdown, type mapping for native datetime/string dtypes.
 3. **v0.3** — Multi-group stores via `ATTACH ... (TYPE ZARR)`; coordinate-range filter pushdown; parallel scan; statistics; **coarsest-grid chunk planning** (relaxes decision 6's uniform-chunk requirement now that the scan engine is being reworked anyway). Goal: beat naive `xarray + pandas` (with dask, on the same thread budget) on a real ERA5 query. Benchmark must capture chunks-decoded vs total chunks, not just wall-clock.
 4. **v0.4** — Remote stores via DuckDB filesystem FFI, secrets integration, community-extension submission.
 5. **Later** — CF time UDFs (deferred until a permissively-licensed implementation path exists; nice-to-have, not blocking), chunk-level statistics (when present), aggregate pushdown, write support, 2D non-dimension coordinates, async `zarrs` if remote latency demands it.
