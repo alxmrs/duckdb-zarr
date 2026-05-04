@@ -184,6 +184,77 @@ For each work unit:
 
 The local scan state holds the current chunk's decoded buffers and a cursor; the global init state holds the immutable work-unit list. This matches DuckDB's morsel-driven model and gives us free intra-query parallelism.
 
+## The pivot algorithm
+
+The "pivot" is the heart of this extension: the operation that turns a decoded N-dimensional Zarr chunk into a stream of 2-D rows DuckDB can scan. xarray-sql's [`iter_record_batches`](https://github.com/alxmrs/xarray-sql/blob/3adf6af86e26cfdda771dfa7df0b70c8dd636e3a/xarray_sql/df.py#L231) (entered through [`read_xarray_table`](https://github.com/alxmrs/xarray-sql/blob/3adf6af86e26cfdda771dfa7df0b70c8dd636e3a/xarray_sql/reader.py#L188)) is the reference implementation; this section translates that algorithm into our Rust + DuckDB context so the v0.1 scan callback is a port, not a fresh design.
+
+### Inputs per work unit
+
+For one work unit (one chunk-index tuple within one dim group):
+
+- **`shape`** — the chunk's logical shape `(s₀, s₁, …, s_{D-1})` in the dim group's canonical order. ERA5 surface chunk: `shape = (24, 10, 10)` over `(time, lat, lon)`.
+- **`coord_values[k]`** — the 1-D slice of the k-th dimension's coordinate array covering this chunk (length `s_k`). Read once at bind into the store-level cache, then sliced per chunk by index.
+- **`data_arrays[v]`** — the decoded chunk for each selected data variable, one `ndarray::ArrayD<T_v>` per variable, total size `prod(shape)`. After `zarrs` decode the buffer is C-contiguous, so a flat `ArrayView1<T_v>` is a zero-copy view.
+
+The chunk holds `total_rows = prod(shape)` logical rows. For an ERA5 surface chunk that's `24 × 10 × 10 = 2,400`.
+
+### The strided-index trick
+
+Walking the chunk in row-major order maps each flat row index `i ∈ [0, total_rows)` to a multi-index via:
+
+```
+strides[k] = product of shape[k+1..D]      // C-order strides
+i_k = (i / strides[k]) % shape[k]          // dim-k position for row i
+```
+
+This is the only piece of arithmetic that has to be exactly right. Row 0 picks coord index 0 in every dim; row 1 advances the innermost dim; row `s_{D-1}` resets the innermost and advances the next-outermost; and so on. It mirrors how `ndarray::ArrayD` lays out its memory after `zarrs` decode — which is why the data-variable side is a slice and the coordinate side is a gather.
+
+### Per-vector loop (inner)
+
+DuckDB scan callbacks fill one `DataChunk` per call, holding up to `STANDARD_VECTOR_SIZE = 2048` rows. (xarray-sql's default `batch_size` is 65,536 — DataFusion tolerates much larger batches than DuckDB's vectorised executor wants. Same algorithm, smaller increment.)
+
+For each `DataChunk` covering rows `[row_start, row_end)`:
+
+1. Build a row-index range `i = row_start..row_end`.
+2. For each output column in schema order:
+   - **Coordinate column k** — compute `coord_idx[i] = (i / strides[k]) % shape[k]`, then gather `coord_values[k][coord_idx[i]]` into the output flat vector. Optionally emit as a DuckDB dictionary vector keyed by `coord_values[k]` (open question — see Implementability risks); the dictionary form skips the gather and just writes indices.
+   - **Data-variable column v** — copy the slice `data_arrays[v][row_start..row_end]` into the output flat vector. Zero-copy where DuckDB's vector layout permits, `memcpy` otherwise.
+3. Apply `_FillValue` masking: any cell whose raw value equals the array's `_FillValue` becomes SQL `NULL` via the DataChunk validity bitmap.
+
+The data-variable copy is where the bytes move; coord gathers are negligible since coords are 1-D and tiny.
+
+### Per-chunk loop (outer)
+
+A single chunk yields `⌈total_rows / STANDARD_VECTOR_SIZE⌉` calls to the scan callback. The local scan state holds:
+
+- the work-unit's chunk-index tuple
+- the decoded `data_arrays[v]` for each selected variable (lifetime: one work unit)
+- a cursor `next_row_start` that survives across scan calls
+
+When `next_row_start == total_rows`, the local state advances to the next work unit from the global init list; the previous chunk's `data_arrays` are dropped.
+
+### What the algorithm does NOT compute
+
+Three things that look like they should be in the inner loop but aren't:
+
+- **The cartesian product of coordinate values.** xarray-sql never materialises an N-dimensional grid of coord tuples; the strided-index trick reconstructs each row's coord values on demand from the 1-D coord arrays. We don't build any intermediate "long-format" table either.
+- **Coord broadcast over the chunk shape.** xarray-sql's simpler `dataset_to_record_batch` uses `np.broadcast_to(coord.reshape(reshape), shape).ravel()` — broadcast is zero-copy, the `ravel()` forces a copy. The streaming `iter_record_batches` skips even that by computing `coord_idx` per batch. We use the streaming form because DuckDB scans incrementally; the all-at-once form has no advantage when the consumer pulls 2,048 rows at a time.
+- **Re-decoding chunks.** Each Zarr chunk is decoded exactly once per work unit. The `data_arrays` stay live in the local scan state until the chunk is fully drained; the inner per-vector loop only slices.
+
+### Invariants bind enforces, scan assumes
+
+The pivot is correct only if the chunk is internally consistent. Bind enforces, before any work unit runs:
+
+- All selected data variables in the dim group share the same `shape` (decision 6 — uniform chunks per dim group).
+- The dim group's canonical dim order matches the data variable's `dimension_names` from xarray's metadata. xarray-sql derives it from `first_var.dims`; our bind picks the same source so coord broadcast and data ravel use the same axis ordering.
+- Coordinate arrays are 1-D and length-matched to their dim's chunk size — pulled from the store-level cache, not re-read per chunk.
+
+If any of these drift, the algorithm silently produces wrong rows. They're checked once at bind, not repeatedly at scan, because chunks within a Zarr group don't change shape mid-query.
+
+### Filter pushdown plugs in here
+
+xarray-sql's `_block_metadata` computes per-partition `(min, max)` for each dim from the actual coord array slice — using `np.min/max`, not first/last, so descending lat (ERA5: 90 → -90) gives the right bounds. We do the same in the chunk planner: for each candidate work unit, `(min, max)` per dim is computed once from the cached coord array (cheap, since coords are tiny) and any work unit whose `(min, max)` doesn't intersect the predicate is dropped. Pruning happens between init and the first scan call, so the scan callback only ever sees work units it must execute.
+
 ## Type mapping
 
 | Zarr dtype           | DuckDB type                  | Notes                                          |
