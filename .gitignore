@@ -5,3 +5,6 @@ configure
 duckdb_unittest_tempdir
 /test/bin
 venv
+.chainlink/
+.claude/
+.mcp.json
