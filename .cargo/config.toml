@@ -1,3 +1,14 @@
 # statically linking the C runtime on windows seems sensible?
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-Ctarget-feature=+crt-static"]
+
+# macOS Tahoe (Darwin 25 / SDK 26.x): Apple clang with --target=arm64-apple-macosx
+# drops the C++ stdlib include search path when the SDK is >= 26.  The snappy_src
+# build script (pulled in via blosc) fails with "fatal error: 'string' file not
+# found" unless we restore the path explicitly.  Using the stable MacOSX.sdk
+# symlink so this survives minor SDK updates.
+[target.aarch64-apple-darwin]
+rustflags = []
+
+[env]
+CXXFLAGS = "-I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1"

@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Zarr v2 + Blosc codec support (#66)
 - Replacement scan: .zarr path interception (#67)
 - Projection pushdown: skip non-requested columns (#68)
 - Design doc for native DuckDB Zarr integration (xarray-sql parity) (#1)
@@ -18,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 ### Changed
+- Zarr v2 support + Blosc/LZ4 codec features (#8)
 - Replacement scan: claim *.zarr paths via suffix + metadata probe (#9)
 - Projection pushdown: only decode requested data variables (#6)
 - v0.2 SQLLogicTest coverage: v2 stores, codecs, replacement scan (#13)
