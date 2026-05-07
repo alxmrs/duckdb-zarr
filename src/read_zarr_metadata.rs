@@ -51,7 +51,7 @@ impl VTab for ReadZarrMetaVTab {
 
         let store_path = bind.get_parameter(0).to_string();
         let store = open_store(&store_path)?;
-        let array_names = list_array_names(&store_path)?;
+        let array_names = list_array_names(&store_path, &store)?;
 
         let aux_coords = collect_auxiliary_coords(&store, &array_names);
         let bounds_vars = collect_bounds_vars(&store, &array_names, &aux_coords);

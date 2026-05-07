@@ -36,6 +36,7 @@ zarrs = { version = "0.23", default-features = false, features = [
 ndarray = "0.17"
 serde_json = "1"
 base64 = "0.22"
+zarrs_http = "0.3.1"
 
 # Enable blosc everywhere except x86_64-pc-windows-gnu (Rtools42/mingw).
 # SKIP_TESTS=1 for that target so blosc is never exercised there in CI.

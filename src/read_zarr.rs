@@ -73,8 +73,14 @@ impl VTab for ReadZarrVTab {
         let path_val = bind.get_parameter(0);
         let store_path = path_val.to_string();
 
+        // Optional dims= named parameter: JSON array string e.g. '["time","lat","lon"]'
+        let requested_dims: Option<Vec<String>> = bind
+            .get_named_parameter("dims")
+            .map(|v| parse_dims_param(&v.to_string()))
+            .transpose()?;
+
         let store = open_store(&store_path)?;
-        let array_names = crate::zarr_reader::meta::list_array_names(&store_path)?;
+        let array_names = crate::zarr_reader::meta::list_array_names(&store_path, &store)?;
 
         if array_names.is_empty() {
             return Err(format!("no Zarr arrays found in '{store_path}'").into());
@@ -85,15 +91,28 @@ impl VTab for ReadZarrVTab {
         if dim_groups.is_empty() {
             return Err(format!("no data variables found in '{store_path}'").into());
         }
-        if dim_groups.len() > 1 {
-            return Err(format!(
-                "'{store_path}' contains multiple dimension groups ({}) {:?}; use read_zarr(path, dims=[...]) to select one",
-                dim_groups.len(),
-                dim_groups.iter().map(|g| &g.dims).collect::<Vec<_>>()
-            ).into());
-        }
 
-        let group = &dim_groups[0];
+        let group = match requested_dims {
+            Some(ref dims) => {
+                dim_groups.iter().find(|g| g.dims == *dims).ok_or_else(|| {
+                    format!(
+                        "'{store_path}': no dimension group matches dims={dims:?}; available: {:?}",
+                        dim_groups.iter().map(|g| &g.dims).collect::<Vec<_>>()
+                    )
+                })?
+            }
+            None => {
+                if dim_groups.len() > 1 {
+                    return Err(format!(
+                        "'{store_path}' contains multiple dimension groups ({}) {:?}; use read_zarr(path, dims=[...]) to select one",
+                        dim_groups.len(),
+                        dim_groups.iter().map(|g| &g.dims).collect::<Vec<_>>()
+                    ).into());
+                }
+                &dim_groups[0]
+            }
+        };
+
         finish_bind(bind, store, group)
     }
 
@@ -193,11 +212,29 @@ impl VTab for ReadZarrVTab {
     fn parameters() -> Option<Vec<duckdb::core::LogicalTypeHandle>> {
         Some(vec![LogicalTypeId::Varchar.into()])
     }
+
+    fn named_parameters() -> Option<Vec<(String, duckdb::core::LogicalTypeHandle)>> {
+        Some(vec![("dims".to_string(), LogicalTypeId::Varchar.into())])
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Parse a `dims` named-parameter value into an ordered list of dimension names.
+///
+/// Accepts either a JSON array (`'["time","lat","lon"]'`) or a plain
+/// comma-separated string (`'time,lat,lon'`).
+fn parse_dims_param(s: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let trimmed = s.trim();
+    if trimmed.starts_with('[') {
+        let arr: Vec<String> = serde_json::from_str(trimmed)?;
+        Ok(arr)
+    } else {
+        Ok(trimmed.split(',').map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect())
+    }
+}
 
 fn finish_bind(
     bind: &BindInfo,
