@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+**Phase 4 — Community extension, CI**
+- Community extension manifest + submission to duckdb/community-extensions (#22)
+
 **Phase 3 — HTTP/S stores, multi-dim-group selection**
 - HTTP/HTTPS store support via `zarrs_http` (#71)
 - Storage adapter shim: dispatch `s3://`, `gs://`, `az://`, `http(s)://` to DuckDB's filesystem FFI (#19)
@@ -36,6 +39,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 - Fix dims= named parameter not registered with DuckDB (#122)
 
+- CI workflow `extension_name` placeholder corrected (`rusty_quack` → `duckdb_zarr`) (#72)
 - `copy_scalar!` macro used `from_le_bytes` but zarrs returns native-endian bytes (#75)
 - `read_zarr_metadata` paginated scan silently truncated stores with >2048 arrays (#76)
 - `read_zarr_metadata` `chunk_shape` column reported chunk-grid dimensions, not per-chunk element shape (#74)
