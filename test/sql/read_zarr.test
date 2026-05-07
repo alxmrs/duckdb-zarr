@@ -1,0 +1,200 @@
+# name: test/sql/read_zarr.test
+# description: read_zarr table function — Phase 1 coverage
+# group: [duckdb_zarr]
+
+require duckdb_zarr
+
+# ── float_baseline ─────────────────────────────────────────────────────────────
+# Plain float32 data variable, dim coords (time int64, lat float64, lon float64).
+# Shape (8, 6, 12) → 576 rows.
+
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr');
+----
+576
+
+query I
+SELECT COUNT(DISTINCT lat) FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr');
+----
+6
+
+query I
+SELECT COUNT(DISTINCT lon) FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr');
+----
+12
+
+# Coordinates span expected ranges.
+query R
+SELECT MIN(lat) FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr');
+----
+-90.000000
+
+query R
+SELECT MAX(lat) FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr');
+----
+90.000000
+
+# Data column is float (non-null for plain float data with no sentinel).
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr') WHERE temperature IS NOT NULL;
+----
+576
+
+# ── read_zarr_metadata ────────────────────────────────────────────────────────
+
+query I
+SELECT COUNT(*) FROM read_zarr_metadata('test/fixtures/xarray_tutorial/float_baseline.zarr');
+----
+4
+
+query TT rowsort
+SELECT name, role FROM read_zarr_metadata('test/fixtures/xarray_tutorial/float_baseline.zarr');
+----
+lat	coord
+lon	coord
+temperature	data
+time	coord
+
+# ── read_zarr_groups ──────────────────────────────────────────────────────────
+
+query I
+SELECT COUNT(*) FROM read_zarr_groups('test/fixtures/xarray_tutorial/float_baseline.zarr');
+----
+1
+
+query T
+SELECT dims FROM read_zarr_groups('test/fixtures/xarray_tutorial/float_baseline.zarr');
+----
+["time","lat","lon"]
+
+# ── air_temperature ───────────────────────────────────────────────────────────
+# int16 on-disk with scale_factor=0.01 → packed-int decoding → Double column.
+# Shape (2920, 25, 53) → 3,869,000 rows.
+
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr');
+----
+3869000
+
+# Decoded temperatures should be reasonable (Kelvin, ~200–320 K).
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr')
+WHERE air > 150.0 AND air < 400.0;
+----
+3869000
+
+# ── unindexed_dim ─────────────────────────────────────────────────────────────
+# dim_0 has no coord → synthesized 0..4 integer range.
+
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/unindexed_dim.zarr');
+----
+120
+
+query I
+SELECT COUNT(DISTINCT dim_0) FROM read_zarr('test/fixtures/xarray_tutorial/unindexed_dim.zarr');
+----
+5
+
+query II
+SELECT MIN(dim_0), MAX(dim_0) FROM read_zarr('test/fixtures/xarray_tutorial/unindexed_dim.zarr');
+----
+0	4
+
+# ── scalar_coord ──────────────────────────────────────────────────────────────
+# hc and Vtransform are 0-dim scalars → excluded from schema.
+# Schema: time, lat, temperature only.
+
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/scalar_coord.zarr');
+----
+12
+
+query T rowsort
+SELECT name FROM read_zarr_metadata('test/fixtures/xarray_tutorial/scalar_coord.zarr')
+WHERE role = 'data' OR role = 'coord';
+----
+lat
+temperature
+time
+
+# ── sparse ────────────────────────────────────────────────────────────────────
+# Only chunk [0,0] written; chunks [0,1], [1,0], [1,1] are implicit (fill_value=-9999).
+# Shape (4,4), chunk (2,2) → 16 rows. fill_value=-9999 → NULL.
+
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/sparse.zarr');
+----
+16
+
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/sparse.zarr') WHERE data IS NULL;
+----
+12
+
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/sparse.zarr') WHERE data IS NOT NULL;
+----
+4
+
+# ── ersstv5 ───────────────────────────────────────────────────────────────────
+# CF bounds variable (time_bnds) must be suppressed from schema.
+# sst has missing_value sentinel.
+
+query I
+SELECT COUNT(*) > 0 FROM read_zarr_metadata('test/fixtures/xarray_tutorial/ersstv5.zarr')
+WHERE name = 'time_bnds' AND role = 'bounds';
+----
+true
+
+# time_bnds must NOT appear as a column in read_zarr output.
+statement error
+SELECT time_bnds FROM read_zarr('test/fixtures/xarray_tutorial/ersstv5.zarr') LIMIT 1;
+----
+Referenced column "time_bnds" not found
+
+# ── basin_mask ────────────────────────────────────────────────────────────────
+# missing_value=-100 (int8), no _FillValue. NULL masking via missing_value.
+
+query I
+SELECT COUNT(*) > 0 FROM read_zarr('test/fixtures/xarray_tutorial/basin_mask.zarr')
+WHERE basin IS NULL;
+----
+true
+
+# ── multi_dim_group ───────────────────────────────────────────────────────────
+# Two dim groups: surface (time,lat,lon) and atmosphere (time,level,lat,lon).
+# read_zarr without selection must error.
+
+statement error
+SELECT * FROM read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr') LIMIT 1;
+----
+contains multiple dimension groups
+
+# read_zarr_groups shows two groups.
+query I
+SELECT COUNT(*) FROM read_zarr_groups('test/fixtures/xarray_tutorial/multi_dim_group.zarr');
+----
+2
+
+# ── air_temperature_gradient ─────────────────────────────────────────────────
+# Mismatched chunk shapes within one dim group → bind error.
+
+statement error
+SELECT * FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature_gradient.zarr') LIMIT 1;
+----
+chunk shape mismatch
+
+# ── big_endian ────────────────────────────────────────────────────────────────
+# Big-endian bytes codec: zarrs normalises to native; memcpy must be correct.
+
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/big_endian.zarr');
+----
+24
+
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/big_endian.zarr')
+WHERE temperature IS NOT NULL;
+----
+24
