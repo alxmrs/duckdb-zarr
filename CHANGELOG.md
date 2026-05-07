@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+**Phase 3 — HTTP/S stores, multi-dim-group selection**
+- HTTP/HTTPS store support via `zarrs_http` (#71)
+- Storage adapter shim: dispatch `s3://`, `gs://`, `az://`, `http(s)://` to DuckDB's filesystem FFI (#19)
+- `read_zarr(path, dims=[...])` named parameter for multi-dim-group selection (#70, #14)
+
 **Phase 2 — Zarr v2, Blosc, replacement scan, projection pushdown**
 - Zarr v2 + Blosc/LZ4 codec support (#66)
 - Replacement scan: bare `.zarr` paths and directories with `zarr.json`/`.zgroup` rewrite to `read_zarr(...)` automatically (#67, #9)

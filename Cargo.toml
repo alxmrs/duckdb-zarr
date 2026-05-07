@@ -34,3 +34,4 @@ zarrs = { version = "0.23", default-features = false, features = [
 ndarray = "0.17"
 serde_json = "1"
 base64 = "0.22"
+zarrs_http = "0.3.1"

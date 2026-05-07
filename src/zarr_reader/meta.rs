@@ -5,25 +5,36 @@ use std::sync::Arc;
 use base64::Engine as _;
 use zarrs::array::Array;
 use zarrs::filesystem::FilesystemStore;
+use zarrs::storage::ReadableStorageTraits;
 
 use super::types::{
     ColumnDef, ColumnEncoding, CoordArray, DimGroup, FillSentinel, WorkUnit, ZarrDtype,
 };
 
-pub type ZarrStore = Arc<FilesystemStore>;
-pub type ZarrArray = Array<FilesystemStore>;
+pub type ZarrStore = Arc<dyn ReadableStorageTraits>;
+pub type ZarrArray = Array<dyn ReadableStorageTraits>;
 
 pub fn open_store(path: &str) -> Result<ZarrStore, Box<dyn std::error::Error>> {
-    Ok(Arc::new(FilesystemStore::new(path)?))
+    if path.starts_with("http://") || path.starts_with("https://") {
+        Ok(Arc::new(zarrs_http::HTTPStore::new(path)?))
+    } else {
+        Ok(Arc::new(FilesystemStore::new(path)?))
+    }
 }
 
 /// List the names of all top-level arrays in the Zarr store root.
 ///
-/// A top-level array is a direct child directory whose `zarr.json` has
-/// `"node_type": "array"`.  Zarr groups at the root level are skipped: the
-/// design assumes a flat store where all arrays live directly under the root.
-/// `.zarray` directories (Zarr v2) are also included.
-pub fn list_array_names(store_path: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+/// For local paths: scans for child directories containing `zarr.json` (v3) or `.zarray` (v2),
+/// checking `node_type` to skip nested groups. For http/https URLs: reads consolidated metadata.
+pub fn list_array_names(store_path: &str, store: &ZarrStore) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    if store_path.starts_with("http://") || store_path.starts_with("https://") {
+        list_array_names_http(store)
+    } else {
+        list_array_names_local(store_path)
+    }
+}
+
+fn list_array_names_local(store_path: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let root = Path::new(store_path);
     let mut names = Vec::new();
     for entry in std::fs::read_dir(root)? {
@@ -53,6 +64,35 @@ pub fn list_array_names(store_path: &str) -> Result<Vec<String>, Box<dyn std::er
             }
         }
     }
+    names.sort();
+    Ok(names)
+}
+
+fn list_array_names_http(store: &ZarrStore) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    use zarrs::group::Group;
+    use zarrs::metadata::NodeMetadata;
+
+    let group = Group::open(store.clone(), "/")?;
+    let consolidated = group.consolidated_metadata().ok_or(
+        "HTTP Zarr store has no consolidated metadata in zarr.json; \
+         write with consolidated=True or use a local path"
+    )?;
+    let mut names: Vec<String> = consolidated
+        .metadata
+        .iter()
+        .filter_map(|(path, meta)| {
+            // Only top-level arrays (no '/' in path after stripping leading '/').
+            let name = path.trim_start_matches('/');
+            if name.contains('/') {
+                return None;
+            }
+            if matches!(meta, NodeMetadata::Array(_)) {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
     names.sort();
     Ok(names)
 }

@@ -44,8 +44,20 @@ unsafe extern "C" fn zarr_replacement_scan(
 }
 
 fn looks_like_zarr(name: &str) -> bool {
-    // Strip trailing slashes for the suffix check.
     let trimmed = name.trim_end_matches('/');
+    let lower = trimmed.to_ascii_lowercase();
+
+    // HTTP/HTTPS: trust the .zarr suffix; can't probe the filesystem.
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return lower.ends_with(".zarr");
+    }
+
+    // Local path with explicit .zarr suffix.
+    if lower.ends_with(".zarr") {
+        return true;
+    }
+
+    // Local path: probe for a Zarr root marker file.
     let p = Path::new(trimmed);
 
     // Design spec §replacement-scan: two-step probe.
