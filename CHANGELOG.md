@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Replacement scan: .zarr path interception (#67)
+- Projection pushdown: skip non-requested columns (#68)
 - Design doc for native DuckDB Zarr integration (xarray-sql parity) (#1)
 - Spike: verified duckdb-rs replacement-scan, ATTACH, dict-vector, config-var, and pushdown APIs (#24)
 - Bootstrap: renamed crate to duckdb_zarr, dropped rusty_quack stub, added zarrs + ndarray deps (#2)
@@ -16,6 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 ### Changed
+- Replacement scan: claim *.zarr paths via suffix + metadata probe (#9)
+- Projection pushdown: only decode requested data variables (#6)
+- v0.2 SQLLogicTest coverage: v2 stores, codecs, replacement scan (#13)
+- Replacement scan: handle trailing slash + uppercase .ZARR + URL-encoded paths (#28)
+- implement projection pushdown in read_zarr VTab (#69)
 - Decision 6 'rarely observed in practice' is wrong: real tutorial data has intra-group chunk mismatches (#40)
 - dimension_names in Zarr v3 is in zarr.json, NOT in array attrs — schema inference must read zarr metadata, not attrs (#46)
 - Coordinate-only dimension (no backing array): tiny dataset has dim_0 with no coord variable (#44)

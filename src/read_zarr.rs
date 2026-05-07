@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -34,6 +34,7 @@ unsafe impl Sync for ReadZarrBind {}
 // ---------------------------------------------------------------------------
 
 pub struct ReadZarrInit {
+    pub projected_cols: HashSet<usize>,
     pub inner: Mutex<LocalState>,
 }
 
@@ -90,8 +91,15 @@ impl VTab for ReadZarrVTab {
         finish_bind(bind, store, group)
     }
 
-    fn init(_init: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
+    fn supports_pushdown() -> bool {
+        true
+    }
+
+    fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
+        let projected_cols: HashSet<usize> =
+            init.get_column_indices().into_iter().map(|i| i as usize).collect();
         Ok(ReadZarrInit {
+            projected_cols,
             inner: Mutex::new(LocalState {
                 current_unit_idx: usize::MAX,
                 current_chunk_bytes: HashMap::new(),
@@ -108,6 +116,7 @@ impl VTab for ReadZarrVTab {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let bind = func.get_bind_data();
         let init = func.get_init_data();
+        let projected = &init.projected_cols;
         let mut state = init.inner.lock().unwrap();
 
         if state.done {
@@ -129,7 +138,7 @@ impl VTab for ReadZarrVTab {
                 }
                 let wu = &bind.work_units[unit_idx];
                 // Decode chunk for each data variable.
-                let chunk_bytes = decode_work_unit(bind, wu)?;
+                let chunk_bytes = decode_work_unit(bind, wu, projected)?;
                 let chunk_rows = compute_chunk_rows(wu, &bind.group_shape, &bind.group_chunk_shape);
                 state.current_unit_idx = unit_idx;
                 state.current_chunk_bytes = chunk_bytes;
@@ -158,6 +167,7 @@ impl VTab for ReadZarrVTab {
                 rows_written,
                 state.row_cursor,
                 can_write,
+                projected,
             );
 
             state.row_cursor += written;
@@ -213,12 +223,16 @@ fn finish_bind(
 fn decode_work_unit(
     bind: &ReadZarrBind,
     wu: &WorkUnit,
+    projected: &HashSet<usize>,
 ) -> Result<HashMap<String, Vec<u8>>, Box<dyn std::error::Error>> {
     let mut chunk_bytes = HashMap::new();
 
-    for col in &bind.columns {
+    for (col_idx, col) in bind.columns.iter().enumerate() {
         if col.is_coord {
             continue; // coord data is pre-loaded at bind time
+        }
+        if !projected.contains(&col_idx) {
+            continue; // skip decompression for non-projected data vars
         }
         let arr = crate::zarr_reader::meta::open_array(&bind.store, &col.name)?;
         // ArrayBytes<'static>: zarrs convention for requesting owned decoded bytes.
@@ -261,6 +275,7 @@ fn fill_chunk_slice(
     vector_base: usize,
     chunk_row_start: usize,
     n_rows: usize,
+    projected: &HashSet<usize>,
 ) -> usize {
     let ndim = wu.chunk_indices.len();
 
@@ -293,9 +308,20 @@ fn fill_chunk_slice(
     }
 
     let mut dim_col_k = 0usize;
+    let mut out_col_idx = 0usize;
 
     for (col_idx, col_def) in col_defs.iter().enumerate() {
-        let mut vector = output.flat_vector(col_idx);
+        let is_projected = projected.contains(&col_idx);
+
+        if !is_projected {
+            if col_def.is_coord {
+                dim_col_k += 1;
+            }
+            continue;
+        }
+
+        let mut vector = output.flat_vector(out_col_idx);
+        out_col_idx += 1;
 
         for out_i in 0..n_rows {
             let flat_row = chunk_row_start + out_i;

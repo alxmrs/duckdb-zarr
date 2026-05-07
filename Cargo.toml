@@ -21,8 +21,9 @@ crate-type = ["staticlib"]
 
 [dependencies]
 duckdb = { version = "=1.10502.0", features = ["loadable-extension"] }
-# blosc excluded: snappy_src build fails on macOS Tahoe (Darwin 25 / SDK 26.x).
-# Re-enable for v0.2 once snappy_src upstream is fixed, or switch to a pure-Rust blosc crate.
+# blosc excluded: snappy_src v0.2.5 build fails on macOS Tahoe (Darwin 25 / SDK 26.x).
+# Zarr v2 stores that use gzip/zstd compression read correctly without it.
+# Blosc-compressed v2 stores are unsupported until upstream is fixed.
 zarrs = { version = "0.23", default-features = false, features = [
     "ndarray",
     "filesystem",

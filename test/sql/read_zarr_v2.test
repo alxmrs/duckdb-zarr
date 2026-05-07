@@ -1,0 +1,53 @@
+# name: test/sql/read_zarr_v2.test
+# description: Zarr v2 stores and replacement scan
+# group: [duckdb_zarr]
+
+require duckdb_zarr
+
+# ── float_baseline_v2 ────────────────────────────────────────────────────────
+# Same data as float_baseline but written as Zarr v2 (.zarray/.zattrs/.zgroup).
+# Shape (8, 6, 12) → 576 rows.
+
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline_v2.zarr');
+----
+576
+
+query I
+SELECT COUNT(DISTINCT lat) FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline_v2.zarr');
+----
+6
+
+query I
+SELECT COUNT(DISTINCT lon) FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline_v2.zarr');
+----
+12
+
+query R
+SELECT MIN(lat) FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline_v2.zarr');
+----
+-90.000000
+
+query R
+SELECT MAX(lat) FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline_v2.zarr');
+----
+90.000000
+
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline_v2.zarr')
+WHERE temperature IS NOT NULL;
+----
+576
+
+# ── replacement scan ──────────────────────────────────────────────────────────
+# Bare .zarr path (no explicit read_zarr call) should be rewritten automatically.
+
+query I
+SELECT COUNT(*) FROM 'test/fixtures/xarray_tutorial/float_baseline_v2.zarr';
+----
+576
+
+query I
+SELECT COUNT(*) FROM 'test/fixtures/xarray_tutorial/float_baseline.zarr';
+----
+576
