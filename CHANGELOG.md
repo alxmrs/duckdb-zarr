@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+**Phase 5 — Integration tests**
+- Integration tests against a small public S3 Zarr store (#21)
+
 **Phase 4 — Community extension, CI**
 - Community extension manifest + submission to duckdb/community-extensions (#22)
 
