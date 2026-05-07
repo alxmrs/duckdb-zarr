@@ -694,8 +694,10 @@ dependencies = [
 name = "duckdb_zarr"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "duckdb",
  "ndarray",
+ "serde_json",
  "zarrs",
 ]
 
