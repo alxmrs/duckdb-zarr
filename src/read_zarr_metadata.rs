@@ -28,9 +28,8 @@ pub struct ReadZarrMetaBind {
 unsafe impl Send for ReadZarrMetaBind {}
 unsafe impl Sync for ReadZarrMetaBind {}
 
-pub struct ReadZarrMetaInit {
-    done: std::sync::atomic::AtomicBool,
-}
+/// InitData carries no state; pagination is driven entirely by `ReadZarrMetaBind::next`.
+pub struct ReadZarrMetaInit;
 
 unsafe impl Send for ReadZarrMetaInit {}
 unsafe impl Sync for ReadZarrMetaInit {}
@@ -61,7 +60,16 @@ impl VTab for ReadZarrMetaVTab {
         for name in &array_names {
             let arr = open_array(&store, name)?;
             let shape = arr.shape().to_vec();
-            let chunk_shape = arr.chunk_grid_shape().to_vec();
+            // chunk_grid_shape() returns number-of-chunks per dim, NOT element shape.
+            // Use chunk_shape([0,0,...]) to get the actual per-chunk element dimensions.
+            let chunk_shape: Vec<u64> = if !shape.is_empty() {
+                let first = vec![0u64; shape.len()];
+                arr.chunk_shape(&first)
+                    .map(|cs| cs.iter().map(|x| x.get()).collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
 
             let dims = get_dim_names(&arr, name).unwrap_or_default();
             let dtype_str = arr.data_type().to_string();
@@ -100,9 +108,7 @@ impl VTab for ReadZarrMetaVTab {
     }
 
     fn init(_: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
-        Ok(ReadZarrMetaInit {
-            done: std::sync::atomic::AtomicBool::new(false),
-        })
+        Ok(ReadZarrMetaInit)
     }
 
     fn func(
@@ -110,21 +116,17 @@ impl VTab for ReadZarrMetaVTab {
         output: &mut duckdb::core::DataChunkHandle,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let bind = func.get_bind_data();
-        let init = func.get_init_data();
-        if init.done.swap(true, Ordering::Relaxed) {
+        let vector_size = unsafe { duckdb::ffi::duckdb_vector_size() as usize };
+
+        // Atomically claim the next batch of rows. fetch_add is safe for concurrent
+        // calls; each call gets a unique [start, end) window into bind.rows.
+        let start = bind.next.fetch_add(vector_size, Ordering::Relaxed);
+        if start >= bind.rows.len() {
             output.set_len(0);
             return Ok(());
         }
-
-        let vector_size = unsafe { duckdb::ffi::duckdb_vector_size() as usize };
-        let start = bind.next.load(Ordering::Relaxed);
         let end = (start + vector_size).min(bind.rows.len());
         let n = end - start;
-
-        if n == 0 {
-            output.set_len(0);
-            return Ok(());
-        }
 
         let v_name = output.flat_vector(0);
         let v_dims = output.flat_vector(1);
@@ -146,11 +148,6 @@ impl VTab for ReadZarrMetaVTab {
         }
 
         output.set_len(n);
-        // For small metadata tables (< vector_size rows), mark done.
-        // For larger tables a real loop would be needed; metadata tables are tiny.
-        if end >= bind.rows.len() {
-            // Done after this batch.
-        }
         Ok(())
     }
 

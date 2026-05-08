@@ -18,18 +18,36 @@ pub fn open_store(path: &str) -> Result<ZarrStore, Box<dyn std::error::Error>> {
 }
 
 /// List the names of all top-level arrays in the Zarr store root.
-/// A top-level array is a direct child directory that contains `zarr.json`.
+///
+/// A top-level array is a direct child directory whose `zarr.json` has
+/// `"node_type": "array"`.  Zarr groups at the root level are skipped: the
+/// design assumes a flat store where all arrays live directly under the root.
+/// `.zarray` directories (Zarr v2) are also included.
 pub fn list_array_names(store_path: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let root = Path::new(store_path);
     let mut names = Vec::new();
     for entry in std::fs::read_dir(root)? {
         let entry = entry?;
-        let ft = entry.file_type()?;
-        if !ft.is_dir() {
+        if !entry.file_type()?.is_dir() {
             continue;
         }
         let child_path = entry.path();
+
+        // Zarr v3: zarr.json present — check node_type to skip nested groups.
         if child_path.join("zarr.json").exists() {
+            let content = std::fs::read_to_string(child_path.join("zarr.json"))?;
+            let meta: serde_json::Value = serde_json::from_str(&content)?;
+            if meta.get("node_type").and_then(|v| v.as_str()) == Some("group") {
+                continue; // nested group — design assumes flat store; skip silently
+            }
+            if let Some(name) = child_path.file_name().and_then(|n| n.to_str()) {
+                names.push(name.to_string());
+            }
+            continue;
+        }
+
+        // Zarr v2: .zarray present.
+        if child_path.join(".zarray").exists() {
             if let Some(name) = child_path.file_name().and_then(|n| n.to_str()) {
                 names.push(name.to_string());
             }
@@ -124,14 +142,16 @@ fn parse_sentinel(
     dtype: &ZarrDtype,
     attrs: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<FillSentinel> {
-    // _FillValue takes precedence over missing_value (CF conventions §2.5.1).
-    if let Some(fv) = attrs.get("_FillValue") {
-        return parse_fill_value(dtype, fv);
+    let fill = attrs.get("_FillValue").and_then(|v| parse_fill_value(dtype, v));
+    let missing = attrs.get("missing_value").and_then(|v| parse_fill_value(dtype, v));
+    // xarray encodes _FillValue=NaN when it has already replaced fill values with NaN
+    // in memory. For stores that use missing_value as the actual on-disk sentinel,
+    // NaN in _FillValue is not the sentinel we need to mask; prefer missing_value.
+    match fill {
+        Some(FillSentinel::Float(v)) if v.is_nan() => missing.or(fill),
+        Some(s) => Some(s),
+        None => missing,
     }
-    if let Some(mv) = attrs.get("missing_value") {
-        return parse_fill_value(dtype, mv);
-    }
-    None
 }
 
 fn parse_fill_value(dtype: &ZarrDtype, v: &serde_json::Value) -> Option<FillSentinel> {
@@ -377,12 +397,17 @@ pub fn load_coord_array(
     let shape = arr.shape().to_vec();
     let n = shape[0] as usize;
 
-    // Retrieve the full 1-D array as raw bytes via ArrayBytes::into_fixed().
-    let _ = n;
+    // ArrayBytes<'static> is the zarrs convention for requesting owned (non-borrowed)
+    // decoded bytes; zarrs allocates a fresh Vec<u8> satisfying the 'static bound.
     let subset = arr.subset_all();
     let array_bytes = arr.retrieve_array_subset::<zarrs::array::ArrayBytes<'static>>(&subset)?;
     let raw = array_bytes.into_fixed().map_err(|_| "coord array has variable-length dtype")?;
     let bytes: Vec<u8> = raw.into_owned();
+    debug_assert_eq!(
+        bytes.len(),
+        n * dtype.byte_size(),
+        "coord byte count mismatch for '{coord_name}'"
+    );
 
     Ok(CoordArray {
         dtype,

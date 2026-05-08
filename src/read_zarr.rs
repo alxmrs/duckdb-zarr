@@ -7,6 +7,7 @@ use duckdb::vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab};
 
 use crate::zarr_reader::meta::{
     build_column_defs, build_work_units, infer_dim_groups, load_coord_array, open_store,
+    ZarrStore,
 };
 use crate::zarr_reader::types::{ColumnDef, CoordArray, DimGroup, WorkUnit, ZarrDtype};
 
@@ -15,7 +16,7 @@ use crate::zarr_reader::types::{ColumnDef, CoordArray, DimGroup, WorkUnit, ZarrD
 // ---------------------------------------------------------------------------
 
 pub struct ReadZarrBind {
-    pub store_path: String,
+    pub store: ZarrStore,
     pub group_shape: Vec<u64>,
     pub group_chunk_shape: Vec<u64>,
     pub columns: Vec<ColumnDef>,
@@ -86,7 +87,7 @@ impl VTab for ReadZarrVTab {
         }
 
         let group = &dim_groups[0];
-        finish_bind(bind, &store, &store_path, group)
+        finish_bind(bind, store, group)
     }
 
     fn init(_init: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
@@ -178,18 +179,17 @@ impl VTab for ReadZarrVTab {
 
 fn finish_bind(
     bind: &BindInfo,
-    store: &crate::zarr_reader::meta::ZarrStore,
-    store_path: &str,
+    store: ZarrStore,
     group: &DimGroup,
 ) -> Result<ReadZarrBind, Box<dyn std::error::Error>> {
     // Load coord arrays.
     let mut coord_arrays: HashMap<String, CoordArray> = HashMap::new();
     for coord_name in &group.coord_var_names {
-        let ca = load_coord_array(store, coord_name)?;
+        let ca = load_coord_array(&store, coord_name)?;
         coord_arrays.insert(coord_name.clone(), ca);
     }
 
-    let columns = build_column_defs(store, group, &coord_arrays)?;
+    let columns = build_column_defs(&store, group, &coord_arrays)?;
 
     // Register output columns with DuckDB.
     for col in &columns {
@@ -200,7 +200,7 @@ fn finish_bind(
     let work_units = build_work_units(group);
 
     Ok(ReadZarrBind {
-        store_path: store_path.to_string(),
+        store,
         group_shape: group.shape.clone(),
         group_chunk_shape: group.chunk_shape.clone(),
         columns,
@@ -214,15 +214,15 @@ fn decode_work_unit(
     bind: &ReadZarrBind,
     wu: &WorkUnit,
 ) -> Result<HashMap<String, Vec<u8>>, Box<dyn std::error::Error>> {
-    let store = open_store(&bind.store_path)?;
     let mut chunk_bytes = HashMap::new();
 
     for col in &bind.columns {
         if col.is_coord {
-            continue; // coord data is pre-loaded
+            continue; // coord data is pre-loaded at bind time
         }
-        let arr = crate::zarr_reader::meta::open_array(&store, &col.name)?;
-        // retrieve_chunk fills missing chunks with fill_value automatically.
+        let arr = crate::zarr_reader::meta::open_array(&bind.store, &col.name)?;
+        // ArrayBytes<'static>: zarrs convention for requesting owned decoded bytes.
+        // retrieve_chunk fills missing (implicit) chunks with fill_value automatically.
         let raw = arr.retrieve_chunk::<zarrs::array::ArrayBytes<'static>>(&wu.chunk_indices)?;
         let bytes: Vec<u8> = raw.into_fixed()
             .map_err(|_| format!("variable-length dtype not supported for '{}'", col.name))?

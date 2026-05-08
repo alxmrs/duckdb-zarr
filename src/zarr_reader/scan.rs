@@ -2,8 +2,10 @@ use duckdb::core::FlatVector;
 
 use super::types::{FillSentinel, ZarrDtype};
 
-/// Copy one scalar element from raw little-endian bytes into a DuckDB vector slot,
+/// Copy one scalar element from raw native-endian bytes into a DuckDB vector slot,
 /// applying NULL masking via the sentinel.
+/// zarrs normalises all chunk bytes to the host's native byte order before returning
+/// them, so from_ne_bytes is always correct here.
 pub fn fill_scalar_element_pub(
     vector: &mut FlatVector<'_>,
     bytes: &[u8],
@@ -36,13 +38,13 @@ pub fn fill_scalar_element_pub(
 pub fn read_int_as_i64_pub(bytes: &[u8], dtype: &ZarrDtype, start: usize) -> i64 {
     match dtype {
         ZarrDtype::Int8 => bytes[start] as i8 as i64,
-        ZarrDtype::Int16 => i16::from_le_bytes(bytes[start..start + 2].try_into().unwrap()) as i64,
-        ZarrDtype::Int32 => i32::from_le_bytes(bytes[start..start + 4].try_into().unwrap()) as i64,
-        ZarrDtype::Int64 => i64::from_le_bytes(bytes[start..start + 8].try_into().unwrap()),
+        ZarrDtype::Int16 => i16::from_ne_bytes(bytes[start..start + 2].try_into().unwrap()) as i64,
+        ZarrDtype::Int32 => i32::from_ne_bytes(bytes[start..start + 4].try_into().unwrap()) as i64,
+        ZarrDtype::Int64 => i64::from_ne_bytes(bytes[start..start + 8].try_into().unwrap()),
         ZarrDtype::UInt8 => bytes[start] as i64,
-        ZarrDtype::UInt16 => u16::from_le_bytes(bytes[start..start + 2].try_into().unwrap()) as i64,
-        ZarrDtype::UInt32 => u32::from_le_bytes(bytes[start..start + 4].try_into().unwrap()) as i64,
-        ZarrDtype::UInt64 => u64::from_le_bytes(bytes[start..start + 8].try_into().unwrap()) as i64,
+        ZarrDtype::UInt16 => u16::from_ne_bytes(bytes[start..start + 2].try_into().unwrap()) as i64,
+        ZarrDtype::UInt32 => u32::from_ne_bytes(bytes[start..start + 4].try_into().unwrap()) as i64,
+        ZarrDtype::UInt64 => u64::from_ne_bytes(bytes[start..start + 8].try_into().unwrap()) as i64,
         _ => 0,
     }
 }
@@ -55,7 +57,7 @@ macro_rules! copy_scalar {
         let start = $src_idx * elem_size;
         let arr: [u8; std::mem::size_of::<$T>()] =
             $bytes[start..start + elem_size].try_into().unwrap();
-        let val = <$T>::from_le_bytes(arr);
+        let val = <$T>::from_ne_bytes(arr);
         if is_fill(val, $sentinel) {
             $vector.set_null($dst_idx);
         } else {
@@ -97,8 +99,12 @@ impl_null_check_int!(u64, UInt, u64);
 impl NullCheck for f32 {
     fn check_fill(self, s: &Option<FillSentinel>) -> bool {
         match s {
+            // CF §2.5.1: a datum is missing iff its value equals _FillValue exactly.
+            // The sentinel is stored as f64; cast self to f64 for the comparison so the
+            // widths match, then use exact equality — not an epsilon band, which would
+            // incorrectly mask non-sentinel values near zero.
             Some(FillSentinel::Float(v)) => {
-                if v.is_nan() { self.is_nan() } else { (self as f64 - v).abs() < f64::EPSILON }
+                if v.is_nan() { self.is_nan() } else { (self as f64) == *v }
             }
             _ => false,
         }
@@ -109,7 +115,7 @@ impl NullCheck for f64 {
     fn check_fill(self, s: &Option<FillSentinel>) -> bool {
         match s {
             Some(FillSentinel::Float(v)) => {
-                if v.is_nan() { self.is_nan() } else { (self - v).abs() < f64::EPSILON }
+                if v.is_nan() { self.is_nan() } else { self == *v }
             }
             _ => false,
         }

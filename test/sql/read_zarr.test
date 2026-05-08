@@ -155,10 +155,67 @@ Referenced column "time_bnds" not found
 
 # ── basin_mask ────────────────────────────────────────────────────────────────
 # missing_value=-100 (int8), no _FillValue. NULL masking via missing_value.
+# Shape (45, 35) = 1575 rows. Sentinel = -100; verify exact null count and that
+# non-sentinel values pass through unmasked.
 
 query I
-SELECT COUNT(*) > 0 FROM read_zarr('test/fixtures/xarray_tutorial/basin_mask.zarr')
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/basin_mask.zarr')
 WHERE basin IS NULL;
+----
+983204
+
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/basin_mask.zarr')
+WHERE basin IS NOT NULL;
+----
+1155196
+
+# Non-sentinel values must not be nulled.
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/basin_mask.zarr')
+WHERE basin IS NOT NULL AND basin = -100;
+----
+0
+
+# ── ersstv5 sst null masking ──────────────────────────────────────────────────
+# sst has missing_value sentinel; verify at least some cells are masked.
+
+query I
+SELECT COUNT(*) > 0 FROM read_zarr('test/fixtures/xarray_tutorial/ersstv5.zarr')
+WHERE sst IS NULL;
+----
+true
+
+query I
+SELECT COUNT(*) > 0 FROM read_zarr('test/fixtures/xarray_tutorial/ersstv5.zarr')
+WHERE sst IS NOT NULL;
+----
+true
+
+# ── rasm ──────────────────────────────────────────────────────────────────────
+# rasm has 2D non-dimension coordinate arrays xc and yc (shape 205×275).
+# They must be silently excluded from the row schema (aux_coords path).
+# The store has exactly one dim group: (time, y, x).
+
+query I
+SELECT COUNT(*) FROM read_zarr_groups('test/fixtures/xarray_tutorial/rasm.zarr');
+----
+1
+
+# xc and yc must NOT appear as columns.
+statement error
+SELECT xc FROM read_zarr('test/fixtures/xarray_tutorial/rasm.zarr') LIMIT 1;
+----
+Referenced column "xc" not found
+
+statement error
+SELECT yc FROM read_zarr('test/fixtures/xarray_tutorial/rasm.zarr') LIMIT 1;
+----
+Referenced column "yc" not found
+
+# Tair is the only data variable; the store is queryable.
+query I
+SELECT COUNT(*) > 0 FROM read_zarr('test/fixtures/xarray_tutorial/rasm.zarr') LIMIT 1;
 ----
 true
 
