@@ -300,6 +300,7 @@ SELECT COUNT(DISTINCT lon) FROM read_zarr('test/fixtures/xarray_tutorial/blosc_m
 ----
 12
 
+
 # ── projection_pushdown ───────────────────────────────────────────────────────
 # Selecting a column subset must skip decompression for omitted data variables
 # and still return correct values for selected columns.
