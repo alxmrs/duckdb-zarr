@@ -1,4 +1,4 @@
-.PHONY: clean clean_all
+.PHONY: clean clean_all generate_fixtures
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
@@ -23,8 +23,19 @@ debug: build_extension_library_debug build_extension_with_metadata_debug
 release: build_extension_library_release build_extension_with_metadata_release
 
 test: test_debug
-test_debug: test_extension_debug
-test_release: test_extension_release
+test_debug: generate_fixtures test_extension_debug
+test_release: generate_fixtures test_extension_release
+
+generate_fixtures:
+	@if command -v uv >/dev/null 2>&1; then \
+		uv run scripts/generate_fixtures.py; \
+	elif [ -f "$(PYTHON_VENV_BIN)" ]; then \
+		$(PYTHON_VENV_BIN) -m pip install --quiet xarray zarr numpy scipy h5netcdf pooch zstandard; \
+		$(PYTHON_VENV_BIN) scripts/generate_fixtures.py; \
+	else \
+		echo "Error: neither uv nor configure/venv found. Run 'make configure' or install uv." >&2; \
+		exit 1; \
+	fi
 
 clean: clean_build clean_rust
 clean_all: clean_configure clean
