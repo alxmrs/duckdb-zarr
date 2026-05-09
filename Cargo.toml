@@ -33,3 +33,5 @@ zarrs = { version = "0.23", default-features = false, features = [
     "transpose",
 ] }
 ndarray = "0.17"
+serde_json = "1"
+base64 = "0.22"
