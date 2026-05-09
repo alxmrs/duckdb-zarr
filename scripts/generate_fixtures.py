@@ -361,6 +361,26 @@ def main() -> None:
         dest, zarr_format=2, consolidated=False, encoding=v2_enc)
     print(f"  wrote {dest}")
 
+    # ── float_baseline_http ──────────────────────────────────────────────────
+    # Same data as float_baseline but with consolidated metadata written into
+    # zarr.json. HTTP stores cannot do directory listing, so the Rust reader
+    # requires consolidated metadata to enumerate arrays over HTTP.
+    print("float_baseline_http (consolidated metadata for HTTP tests)...")
+    rng = np.random.default_rng(0)
+    data = rng.standard_normal((8, 6, 12)).astype("float32")
+    lat = np.linspace(-90.0, 90.0, 6)
+    lon = np.linspace(0.0, 360.0, 12, endpoint=False)
+    time = np.arange(8, dtype="int64")
+    da = xr.DataArray(data, dims=["time", "lat", "lon"],
+                      coords={"time": time, "lat": lat, "lon": lon},
+                      attrs={"units": "K", "long_name": "temperature"})
+    dest = FIXTURES / "float_baseline_http.zarr"
+    if dest.exists():
+        shutil.rmtree(dest)
+    xr.Dataset({"temperature": da}).to_zarr(dest, zarr_format=3, consolidated=False)
+    zarr.consolidate_metadata(str(dest))
+    print(f"  wrote {dest} (with consolidated metadata)")
+
     print("\nAll fixtures written.")
 
 
