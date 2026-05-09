@@ -1,0 +1,364 @@
+# name: test/sql/realistic_queries.test
+# description: Realistic end-to-end SQL queries mirroring xarray-sql test patterns
+# group: [duckdb_zarr]
+
+require duckdb_zarr
+
+# ── 1. Basic sanity / SELECT ─────────────────────────────────────────────────
+# Mirror: test_sanity, test_basic_select_all
+
+# LIMIT is applied before counting.
+query I
+SELECT COUNT(*) FROM (SELECT lat, lon, air, time FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr') LIMIT 100);
+----
+100
+
+# Total row count = product of all dimension sizes (2920 × 25 × 53).
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr');
+----
+3869000
+
+# SELECT * brings back all four columns without error.
+query I
+SELECT COUNT(*) FROM (SELECT * FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr') LIMIT 10);
+----
+10
+
+# ── 2. Spatial aggregation (GROUP BY lat, lon) ───────────────────────────────
+# Mirror: test_aggregation_small, test_aggregation_large
+
+# Distinct (lat, lon) pairs = 25 × 53 = 1325.
+query I
+SELECT COUNT(*) FROM (
+    SELECT lat, lon, AVG(air) AS air_avg
+    FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr')
+    GROUP BY lat, lon
+);
+----
+1325
+
+# Every (lat, lon) pair has exactly the same number of time steps (2920).
+query II
+SELECT MIN(cnt), MAX(cnt) FROM (
+    SELECT lat, lon, COUNT(*) AS cnt
+    FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr')
+    GROUP BY lat, lon
+);
+----
+2920	2920
+
+# SUM aggregation: same number of groups.
+query I
+SELECT COUNT(*) FROM (
+    SELECT lat, lon, SUM(air) AS air_total
+    FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr')
+    GROUP BY lat, lon
+);
+----
+1325
+
+# Synthetic dataset: 6 lat × 12 lon = 72 spatial groups.
+query I
+SELECT COUNT(*) FROM (
+    SELECT lat, lon, AVG(temperature) AS mean_temp
+    FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr')
+    GROUP BY lat, lon
+);
+----
+72
+
+# ── 3. Filtering / WHERE ─────────────────────────────────────────────────────
+# Mirror: test_weather_queries
+
+# All decoded air values are physically plausible (Kelvin, NCEP reanalysis).
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr')
+WHERE air > 150.0 AND air < 400.0;
+----
+3869000
+
+# Filter to a single latitude band: 53 lon × 2920 time = 154760 rows.
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr')
+WHERE lat = 15.0;
+----
+154760
+
+# Integer time coordinate filter (time values 0..7 in float_baseline).
+# Rows where time >= 4: 4 time steps × 6 lat × 12 lon = 288.
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr')
+WHERE time >= 4;
+----
+288
+
+# Rows above the mean are roughly half (282 of 576).
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr')
+WHERE temperature > (SELECT AVG(temperature) FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr'));
+----
+282
+
+# ── 4. Scalar aggregates ─────────────────────────────────────────────────────
+# Mirror: test_synthetic_aggregations
+
+# MIN / MAX are physical bounds for NCEP reanalysis (Kelvin).
+query R
+SELECT ROUND(MIN(air)::DOUBLE, 1) FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr');
+----
+221.000000
+
+query R
+SELECT ROUND(MAX(air)::DOUBLE, 1) FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr');
+----
+317.400000
+
+# MIN ≤ AVG ≤ MAX always holds.
+query I
+SELECT COUNT(*) FROM (
+    SELECT MIN(air) AS mn, MAX(air) AS mx, AVG(air) AS av
+    FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr')
+) WHERE mn < av AND av < mx;
+----
+1
+
+# Float baseline: exact MIN and MAX from known seeded random data.
+query R
+SELECT ROUND(MIN(temperature)::DOUBLE, 3)
+FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr');
+----
+-3.899000
+
+query R
+SELECT ROUND(MAX(temperature)::DOUBLE, 3)
+FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr');
+----
+3.066000
+
+# ── 5. NULL-aware aggregates ─────────────────────────────────────────────────
+# Mirror: TestNanAsNull
+
+# sparse.zarr: fill_value=-9999 → NULL. Only the top-left 2×2 chunk is written.
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/sparse.zarr');
+----
+16
+
+# COUNT(col) excludes NULLs; COUNT(*) does not.
+query I
+SELECT COUNT(data) FROM read_zarr('test/fixtures/xarray_tutorial/sparse.zarr');
+----
+4
+
+query I
+SELECT COUNT(*) - COUNT(data) AS null_count
+FROM read_zarr('test/fixtures/xarray_tutorial/sparse.zarr');
+----
+12
+
+# SUM and AVG ignore NULLs; all four real cells = 1.0.
+query R
+SELECT SUM(data) FROM read_zarr('test/fixtures/xarray_tutorial/sparse.zarr');
+----
+4.000000
+
+query R
+SELECT AVG(data) FROM read_zarr('test/fixtures/xarray_tutorial/sparse.zarr');
+----
+1.000000
+
+# MAX/MIN on a column with NULLs return the non-null extremes.
+query R
+SELECT MIN(data) FROM read_zarr('test/fixtures/xarray_tutorial/sparse.zarr');
+----
+1.000000
+
+query R
+SELECT MAX(data) FROM read_zarr('test/fixtures/xarray_tutorial/sparse.zarr');
+----
+1.000000
+
+# ersstv5: missing_value sentinel → NULL; verify non-null fraction.
+query I
+SELECT COUNT(sst) FROM read_zarr('test/fixtures/xarray_tutorial/ersstv5.zarr');
+----
+6856512
+
+# ── 6. Top-N with ORDER BY ───────────────────────────────────────────────────
+
+# Top 10 warmest (lat, lon) pairs by mean air temperature.
+query I
+SELECT COUNT(*) FROM (
+    SELECT lat, lon, AVG(air) AS mean_air
+    FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr')
+    GROUP BY lat, lon
+    ORDER BY mean_air DESC
+    LIMIT 10
+);
+----
+10
+
+# Warmest location is lat=15 °N, lon=257.5 °E (Central America, NCEP).
+query RR
+SELECT ROUND(lat::DOUBLE, 1), ROUND(lon::DOUBLE, 1)
+FROM (
+    SELECT lat, lon, AVG(air) AS mean_air
+    FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr')
+    GROUP BY lat, lon
+    ORDER BY mean_air DESC
+    LIMIT 1
+);
+----
+15.000000	257.500000
+
+# ── 7. CTEs and subqueries ───────────────────────────────────────────────────
+
+# Count time steps whose global-mean air temperature exceeds 281 K.
+# Exactly half (1460 of 2920) are above that threshold.
+query I
+WITH time_means AS (
+    SELECT time, AVG(air) AS mean_air
+    FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr')
+    GROUP BY time
+)
+SELECT COUNT(*) FROM time_means WHERE mean_air > 281.0;
+----
+1460
+
+# Count (lat, lon) pairs warmer than the global mean (703 of 1325).
+query I
+WITH spatial_means AS (
+    SELECT lat, lon, AVG(air) AS mean_air
+    FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr')
+    GROUP BY lat, lon
+)
+SELECT COUNT(*) FROM spatial_means
+WHERE mean_air > (SELECT AVG(air) FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr'));
+----
+703
+
+# Subquery: readings above 300 K (tropical/summer). Exact count from NCEP data.
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr')
+WHERE air > 300.0;
+----
+191987
+
+# ── 8. Cross-JOIN and multi-store JOIN ───────────────────────────────────────
+# Mirror: test_cross_join
+
+# Cross-join distinct lat and lon axes → full spatial grid.
+query I
+SELECT COUNT(*) FROM
+    (SELECT DISTINCT lat FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr')) a
+CROSS JOIN
+    (SELECT DISTINCT lon FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr')) b;
+----
+72
+
+# Inner join: pair surface (t2m) with atmosphere (temp) at 1000 hPa.
+# JOIN dims: time × lat × lon → 4 × 5 × 8 = 160 rows.
+query I
+SELECT COUNT(*) FROM
+    read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr', dims='["time","lat","lon"]') s
+JOIN
+    read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr', dims='["time","level","lat","lon"]') a
+ON s.time = a.time AND s.lat = a.lat AND s.lon = a.lon
+WHERE a.level = 1000.0;
+----
+160
+
+# Both t2m (surface) and temp (atmosphere) columns accessible in the joined result.
+query I
+SELECT COUNT(*) FROM (
+    SELECT s.t2m, a.temp
+    FROM read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr', dims='["time","lat","lon"]') s
+    JOIN read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr', dims='["time","level","lat","lon"]') a
+    ON s.time = a.time AND s.lat = a.lat AND s.lon = a.lon
+    WHERE a.level = 1000.0
+);
+----
+160
+
+# ── 9. Time-axis queries ─────────────────────────────────────────────────────
+# Mirror: TestCftimeGregorianLike
+
+# rasm: 36 monthly time steps (noleap CF calendar stored as raw float64).
+query I
+SELECT COUNT(DISTINCT time) FROM read_zarr('test/fixtures/xarray_tutorial/rasm.zarr');
+----
+36
+
+# Total row count = 36 × 205 × 275 = 2029500.
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/rasm.zarr');
+----
+2029500
+
+# COUNT(Tair) excludes NaN-masked ocean/land cells.
+query I
+SELECT COUNT(Tair) FROM read_zarr('test/fixtures/xarray_tutorial/rasm.zarr');
+----
+935856
+
+# Time axis is monotonically increasing when ordered.
+# LAG returns NULL for the first row, which is excluded from the WHERE.
+query I
+SELECT COUNT(*) FROM (
+    SELECT time, LAG(time) OVER (ORDER BY time) AS prev_time
+    FROM (SELECT DISTINCT time FROM read_zarr('test/fixtures/xarray_tutorial/rasm.zarr'))
+) WHERE time <= prev_time;
+----
+0
+
+# Temporal filter: rows in the second half of the time series.
+# 18 of 36 time steps are in the upper half of the range.
+query I
+SELECT COUNT(DISTINCT time) FROM read_zarr('test/fixtures/xarray_tutorial/rasm.zarr')
+WHERE time > (
+    SELECT (MIN(time) + MAX(time)) / 2.0
+    FROM read_zarr('test/fixtures/xarray_tutorial/rasm.zarr')
+);
+----
+18
+
+# ── 10. Window functions ─────────────────────────────────────────────────────
+
+# RANK over spatial groups: top 10 warmest locations via QUALIFY.
+query I
+SELECT COUNT(*) FROM (
+    SELECT lat, lon, AVG(air) AS mean_air
+    FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr')
+    GROUP BY lat, lon
+    QUALIFY RANK() OVER (ORDER BY AVG(air) DESC) <= 10
+);
+----
+10
+
+# ROW_NUMBER per lat band: each time step within a lat gets a unique number 1..53.
+query I
+SELECT COUNT(*) FROM (
+    SELECT lat, time, air,
+           ROW_NUMBER() OVER (PARTITION BY lat, time ORDER BY lon) AS rn
+    FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr')
+) WHERE rn = 1;
+----
+73000
+
+# ── 11. Error cases ──────────────────────────────────────────────────────────
+# Mirror: test_invalid_column_name, test_invalid_table_name, test_sql_syntax_error
+
+statement error
+SELECT nonexistent FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr');
+----
+Referenced column "nonexistent" not found
+
+statement error
+SELECT * FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr') WHERE nonexistent > 0;
+----
+Referenced column "nonexistent" not found
+
+statement error
+SELECT * FROM read_zarr('/tmp/duckdb_zarr_nonexistent_path.zarr');
+----

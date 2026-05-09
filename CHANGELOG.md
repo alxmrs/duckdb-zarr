@@ -60,6 +60,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `ColumnDef.dim_idx: Option<usize>` replaces fragile `dim_col_k` counter in `fill_chunk_slice` (#81)
 
 ### Changed
+- Write comprehensive SQL tests mirroring xarray-sql test_sql.py (#124)
 - wire generate_fixtures as Makefile test prerequisite so CI generates zarr fixtures before running tests (#127)
 - Fix rusty_quack remnant in GitHub workflow artifact paths (#123)
 - address Phase 2 adversarial review round 2 (#98-#109) (#111)
