@@ -34,6 +34,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - zarrs 0.23 Cargo feature audit (#27)
 
 ### Fixed
+- Fix dims= named parameter not registered with DuckDB (#122)
 
 - `copy_scalar!` macro used `from_le_bytes` but zarrs returns native-endian bytes (#75)
 - `read_zarr_metadata` paginated scan silently truncated stores with >2048 arrays (#76)
