@@ -46,13 +46,40 @@ unsafe extern "C" fn zarr_replacement_scan(
 fn looks_like_zarr(name: &str) -> bool {
     // Strip trailing slashes for the suffix check.
     let trimmed = name.trim_end_matches('/');
+    let p = Path::new(trimmed);
 
-    // Accept explicit .zarr suffix (case-insensitive).
+    // Design spec §replacement-scan: two-step probe.
+    // Step 1: suffix check (case-insensitive). Step 2: zarr.json/.zgroup stat.
+    // Suffix-less paths are NOT probed — that would stat every SQL identifier.
     if trimmed.to_ascii_lowercase().ends_with(".zarr") {
-        return true;
+        return p.join("zarr.json").exists() || p.join(".zgroup").exists();
     }
 
-    // Also accept bare directory paths that contain a Zarr root marker.
-    let p = Path::new(trimmed);
-    p.join("zarr.json").exists() || p.join(".zgroup").exists()
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_zarr;
+
+    #[test]
+    fn uppercase_zarr_suffix_not_claimed_if_missing() {
+        // .ZARR suffix without existing directory → false (stat fails)
+        assert!(!looks_like_zarr("/tmp/NONEXISTENT_PATH.ZARR"));
+        assert!(!looks_like_zarr("/tmp/NONEXISTENT_PATH.zarr"));
+    }
+
+    #[test]
+    fn suffix_less_paths_not_claimed() {
+        // Bare SQL identifiers must never trigger a stat.
+        assert!(!looks_like_zarr("my_table"));
+        assert!(!looks_like_zarr("some_schema.my_table"));
+        assert!(!looks_like_zarr("SELECT"));
+    }
+
+    #[test]
+    fn trailing_slash_stripped_before_suffix_check() {
+        // Should not claim a non-existent path even with trailing slash.
+        assert!(!looks_like_zarr("/tmp/NONEXISTENT.zarr/"));
+    }
 }

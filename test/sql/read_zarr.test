@@ -277,6 +277,50 @@ FROM read_zarr('test/fixtures/xarray_tutorial/blosc_compressed.zarr');
 ----
 -0.4564
 
+# ── blosc_multichunk ──────────────────────────────────────────────────────────
+# Zarr v3 with Blosc/LZ4 codec, shape (8,12) chunked (4,6) → 4 chunks, 96 rows.
+# Exercises chunk-boundary reassembly: strides and value offsets must be correct
+# across all four chunk blocks, not just the first.
+
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/blosc_multichunk.zarr');
+----
+96
+
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/blosc_multichunk.zarr')
+WHERE temperature IS NOT NULL;
+----
+96
+
+# Exact SUM catches any byte-offset bug that silently reads wrong values.
+query R
+SELECT ROUND(SUM(temperature)::DOUBLE, 4)
+FROM read_zarr('test/fixtures/xarray_tutorial/blosc_multichunk.zarr');
+----
+0.3816
+
+# Coord ranges span the full shape — confirms all rows from all chunks included.
+query R
+SELECT MIN(lat) FROM read_zarr('test/fixtures/xarray_tutorial/blosc_multichunk.zarr');
+----
+-90.000000
+
+query R
+SELECT MAX(lat) FROM read_zarr('test/fixtures/xarray_tutorial/blosc_multichunk.zarr');
+----
+90.000000
+
+query I
+SELECT COUNT(DISTINCT lat) FROM read_zarr('test/fixtures/xarray_tutorial/blosc_multichunk.zarr');
+----
+8
+
+query I
+SELECT COUNT(DISTINCT lon) FROM read_zarr('test/fixtures/xarray_tutorial/blosc_multichunk.zarr');
+----
+12
+
 # ── projection_pushdown ───────────────────────────────────────────────────────
 # Selecting a column subset must skip decompression for omitted data variables
 # and still return correct values for selected columns.
@@ -319,3 +363,39 @@ SELECT COUNT(*) FROM (SELECT data FROM read_zarr('test/fixtures/xarray_tutorial/
 WHERE data IS NULL;
 ----
 12
+
+# Projected lat values match full-scan values (catches column-swap bugs).
+query R
+SELECT MIN(lat) FROM (SELECT lat FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr'));
+----
+-90.000000
+
+query R
+SELECT MAX(lat) FROM (SELECT lat FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr'));
+----
+90.000000
+
+# Projected lon values are independent of lat (catches lat/lon swap).
+query R
+SELECT MIN(lon) FROM (SELECT lon FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr'));
+----
+0.000000
+
+query R
+SELECT MAX(lon) FROM (SELECT lon FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr'));
+----
+330.000000
+
+# Projected temperature SUM matches full-scan SUM (catches data variable column-swap).
+query R
+SELECT ROUND(SUM(temperature)::DOUBLE, 2)
+FROM (SELECT temperature FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr'));
+----
+-4.270000
+
+# Projected air SUM from packed-int store matches full-scan SUM.
+query R
+SELECT ROUND(SUM(air)::DOUBLE, 0)
+FROM (SELECT air FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr'));
+----
+1088175738.000000

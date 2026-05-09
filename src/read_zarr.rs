@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -26,7 +26,8 @@ pub struct ReadZarrBind {
     pub next_unit: AtomicUsize,
 }
 
-// SAFETY: AtomicUsize is Send+Sync. Other fields are pure data.
+// SAFETY: All fields are Send+Sync: AtomicUsize, HashMap with Send values, Vec.
+// DuckDB calls bind once; the resulting data is read-only during scan.
 unsafe impl Send for ReadZarrBind {}
 unsafe impl Sync for ReadZarrBind {}
 
@@ -35,7 +36,9 @@ unsafe impl Sync for ReadZarrBind {}
 // ---------------------------------------------------------------------------
 
 pub struct ReadZarrInit {
-    pub projected_cols: HashSet<usize>,
+    /// Maps schema column index → output-vector index (sorted by schema index).
+    /// Explicit mapping avoids any assumption about the order DuckDB returns projected indices.
+    pub projected_cols: HashMap<usize, usize>,
     pub inner: Mutex<LocalState>,
 }
 
@@ -51,6 +54,8 @@ pub struct LocalState {
     pub done: bool,
 }
 
+// SAFETY: projected_cols is written once at init and read-only thereafter.
+// inner is a Mutex<LocalState>, so concurrent access is synchronized.
 unsafe impl Send for ReadZarrInit {}
 unsafe impl Sync for ReadZarrInit {}
 
@@ -97,8 +102,11 @@ impl VTab for ReadZarrVTab {
     }
 
     fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
-        let projected_cols: HashSet<usize> =
-            init.get_column_indices().into_iter().map(|i| i as usize).collect();
+        let mut indices: Vec<usize> = init.get_column_indices().into_iter().map(|i| i as usize).collect();
+        indices.sort_unstable();
+        let projected_cols: HashMap<usize, usize> = indices.into_iter().enumerate()
+            .map(|(out_idx, col_idx)| (col_idx, out_idx))
+            .collect();
         Ok(ReadZarrInit {
             projected_cols,
             inner: Mutex::new(LocalState {
@@ -233,7 +241,7 @@ fn finish_bind(
 fn decode_work_unit(
     bind: &ReadZarrBind,
     wu: &WorkUnit,
-    projected: &HashSet<usize>,
+    projected: &HashMap<usize, usize>,
 ) -> Result<HashMap<String, Vec<u8>>, Box<dyn std::error::Error>> {
     let mut chunk_bytes = HashMap::new();
 
@@ -241,7 +249,7 @@ fn decode_work_unit(
         if col.is_coord {
             continue; // coord data is pre-loaded at bind time
         }
-        if !projected.contains(&col_idx) {
+        if !projected.contains_key(&col_idx) {
             continue; // skip decompression for non-projected data vars
         }
         let arr = bind.arrays.get(&col.name)
@@ -286,7 +294,7 @@ fn fill_chunk_slice(
     vector_base: usize,
     chunk_row_start: usize,
     n_rows: usize,
-    projected: &HashSet<usize>,
+    projected: &HashMap<usize, usize>,
 ) -> usize {
     let ndim = wu.chunk_indices.len();
 
@@ -318,15 +326,13 @@ fn fill_chunk_slice(
         zarrs_strides[k] = zarrs_strides[k + 1] * zarrs_shape[k + 1];
     }
 
-    let mut out_col_idx = 0usize;
-
     for (col_idx, col_def) in col_defs.iter().enumerate() {
-        if !projected.contains(&col_idx) {
-            continue;
-        }
+        let out_vec_idx = match projected.get(&col_idx) {
+            Some(&i) => i,
+            None => continue,
+        };
 
-        let mut vector = output.flat_vector(out_col_idx);
-        out_col_idx += 1;
+        let mut vector = output.flat_vector(out_vec_idx);
 
         for out_i in 0..n_rows {
             let flat_row = chunk_row_start + out_i;
@@ -376,7 +382,7 @@ fn fill_chunk_slice(
                         dst,
                     );
                 } else {
-                    vector.set_null(dst);
+                    unreachable!("projected data variable '{}' missing from chunk_bytes", col_def.name);
                 }
             }
         }
