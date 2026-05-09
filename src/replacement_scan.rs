@@ -52,18 +52,11 @@ fn looks_like_zarr(name: &str) -> bool {
         return lower.ends_with(".zarr");
     }
 
-    // Local path with explicit .zarr suffix.
-    if lower.ends_with(".zarr") {
-        return true;
-    }
-
-    // Local path: probe for a Zarr root marker file.
-    let p = Path::new(trimmed);
-
-    // Design spec §replacement-scan: two-step probe.
+    // Design spec §replacement-scan: two-step probe for local paths.
     // Step 1: suffix check (case-insensitive). Step 2: zarr.json/.zgroup stat.
     // Suffix-less paths are NOT probed — that would stat every SQL identifier.
-    if trimmed.to_ascii_lowercase().ends_with(".zarr") {
+    if lower.ends_with(".zarr") {
+        let p = Path::new(trimmed);
         return p.join("zarr.json").exists() || p.join(".zgroup").exists();
     }
 
