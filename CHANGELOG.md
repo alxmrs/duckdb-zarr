@@ -57,6 +57,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `ColumnDef.dim_idx: Option<usize>` replaces fragile `dim_col_k` counter in `fill_chunk_slice` (#81)
 
 ### Changed
+- Fix rusty_quack remnant in GitHub workflow artifact paths (#123)
 - address Phase 2 adversarial review round 2 (#98-#109) (#111)
 - Adversarial code review of impl-v2 branch (Phase 2) (#110)
 - float_baseline_http fixture is generated but untested — dead test fixture in the repo (#105)
