@@ -1,0 +1,5 @@
+# name: test/sql/duckdb_zarr.test
+# description: smoke test that the duckdb_zarr extension loads
+# group: [duckdb_zarr]
+
+require duckdb_zarr

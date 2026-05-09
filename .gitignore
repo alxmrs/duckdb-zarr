@@ -8,3 +8,4 @@ venv
 .chainlink/
 .claude/
 .mcp.json
+test/fixtures/xarray_tutorial

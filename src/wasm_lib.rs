@@ -11,4 +11,4 @@ mod lib;
 // example, do not change the content of the file.
 //
 // To build the Wasm target explicitly, use:
-//   cargo build --example $PACKAGE_NAME
+//   cargo build --example duckdb_zarr

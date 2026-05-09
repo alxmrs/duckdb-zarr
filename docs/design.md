@@ -178,7 +178,7 @@ The `zarr_reader` module is the natural seam — it depends on [`zarrs`](https:/
 
 1. Open the store with `zarrs` and read group metadata.
 2. Classify arrays as coordinates vs data variables. **Honor xarray's metadata first**, but read it from the right place — Zarr v2 puts `_ARRAY_DIMENSIONS` in `.zattrs` (per-array attrs), while Zarr v3 makes `dimension_names` a first-class field in the array's `zarr.json` metadata, *not* in attrs. The bind code must branch on format version: `zarrs` exposes the v3 field via `ArrayMetadataV3::dimension_names`. Falling through to attrs for v3 stores would silently miss the metadata on every array and degrade to the heuristic. Fall back to "1D = coord, nD = data" only when both metadata locations come up empty.
-3. Read the `coordinates` attribute on each data variable. xarray uses this to mark *non-dimension* coordinates — typically a 2D `lat(y, x) / lon(y, x)` mesh on satellite swath data, where the coord variable is itself nD. v1 cannot represent these as scalar columns; if encountered, error at bind ("non-dimension coordinate `lat` has shape (1024, 1024); 2D coords are deferred").
+3. Read the `coordinates` attribute on each data variable. xarray uses this to mark *non-dimension* coordinates — typically a 2D `lat(y, x) / lon(y, x)` mesh on satellite swath data, where the coord variable is itself nD. v1 cannot represent these as scalar columns; if encountered, error at bind ("non-dimension coordinate `lat` has shape (1024, 1024); 2D coords are deferred"). **This step must run before step 5 (dim-group enumeration).** An nD array identified here as a non-dimension coord must be excluded from the data-variable pool before grouping. If step 3 runs after grouping, a 2D coord like `xc(y, x)` is indistinguishable from a data variable over `(y, x)` and silently lands in a spurious dim group. The `rasm` fixture demonstrates this: `Tair` carries `coordinates='yc xc'`; without pre-grouping exclusion, `xc` and `yc` form a spurious `(y, x)` group with two float64 columns, no error, and wrong output.
 4. Suppress CF metadata variables that aren't real data:
    - **Bounds variables** (CF §7.1) — a coord with attrs like `time.attrs['bounds'] == 'time_bnds'` declares `time_bnds` as its cell-boundary descriptor. `time_bnds` then has shape `(N, 2)` and an extra `nbnds` dimension. Without filtering, `time_bnds` becomes a spurious dim group with one meaningless table — the `ersstv5` tutorial dataset triggers this exact case. Identification: parent coord has a `bounds` attribute pointing at the variable name. Fallback when the attr is missing: variable name matches `<dim>_bnds` / `<dim>_bounds` *and* shape is `(N, 2)`. Suppressed bounds are exposed in `read_zarr_metadata.attrs` on the parent coord, not as a top-level array.
    - **Scalar (0-dim) coordinates** — ROMS-style stores attach physical constants as Zarr arrays with `shape = []` (e.g. `hc = critical depth`, `Vtransform = 2`). Including them as columns would repeat the same constant on every row; they're metadata, not data. Surface in `read_zarr_metadata.attrs` and exclude from the row schema. The schema-inference code must guard the strides computation against `shape = []` so bind doesn't panic.
@@ -237,7 +237,7 @@ This is the only piece of arithmetic that has to be exactly right. Row 0 picks c
 
 ### Per-vector loop (inner)
 
-DuckDB scan callbacks fill one `DataChunk` per call, holding up to `STANDARD_VECTOR_SIZE = 2048` rows. (xarray-sql's default `batch_size` is 65,536 — DataFusion tolerates much larger batches than DuckDB's vectorised executor wants. Same algorithm, smaller increment.)
+DuckDB scan callbacks fill one `DataChunk` per call. The per-call row budget is queried at runtime via `duckdb_vector_size()` (the C API) or the equivalent duckdb-rs output-vector size — **not** hardcoded as 2048. The default is 2048, but DuckDB can be compiled with a different `STANDARD_VECTOR_SIZE`, and an extension that hardcodes the constant will silently overflow the DataChunk buffer if the value is ever larger. (xarray-sql's default `batch_size` is 65,536 — DataFusion tolerates much larger batches than DuckDB's vectorised executor wants. Same algorithm, smaller increment.)
 
 For each `DataChunk` covering rows `[row_start, row_end)`:
 
@@ -301,7 +301,9 @@ CF-encoded time appears in real stores as `int32`, `int64`, `float32`, or `float
 
 ### Packed integer decoding (CF §8.1)
 
-A data variable carrying `scale_factor` and/or `add_offset` attrs is *packed*: the on-disk integer is a quantization of a real-valued measurement. Real example from the `air_temperature_gradient` xarray tutorial dataset:
+A data variable whose **on-disk dtype is an integer type** (i8/u8/i16/u16/i32/u32/i64/u64) *and* that carries `scale_factor` and/or `add_offset` attrs is *packed*: the on-disk integer is a quantization of a real-valued measurement. **The integer dtype is required.** A float array that incidentally carries `scale_factor` as legacy metadata (measurement precision, grid resolution) must NOT be decoded — applying `scale * value + offset` to already-decoded floats would corrupt them by a factor of ~100×. The trigger condition is `integer_dtype AND (has scale_factor OR has add_offset)`, not the presence of attrs alone.
+
+Real example from the `air_temperature_gradient` xarray tutorial dataset:
 
 ```
 Tair: dtype=int16, attrs={scale_factor: 0.01, add_offset: 0.0}
@@ -323,6 +325,10 @@ Reading the raw `int16` and exposing it as DuckDB `SMALLINT` would produce `2731
 3. Otherwise no CF-level NULL masking.
 
 This is **separate** from the array-level `fill_value` in `zarr.json`, which controls what an *implicit* (missing) chunk decodes to (see Scan phase). Conflating the two corrupts both behaviors: `fill_value` is for chunks that don't exist on disk; `_FillValue` / `missing_value` is for sentinel cells within decoded chunks.
+
+**Base64-encoded sentinel values (xarray convention).** When xarray writes a Zarr v3 store it encodes the `_FillValue` array attribute as a **base64 byte string** regardless of the actual value — including non-NaN floats. Specifically: xarray base64-encodes the 8 raw IEEE 754 float64 bytes of the sentinel in little-endian order. Example: `_FillValue = NaN` → `"AAAAAAAA+H8="`, `_FillValue = -9.97e36` → `"AAAAAAAAnsc="`. By contrast, `missing_value` (also a CF attr) is written as a plain JSON number, and zarr.json's own `fill_value` field uses zarr-spec string literals (`"NaN"`, `"Infinity"`) — neither is base64.
+
+The Rust reader must therefore handle `_FillValue` specially: if the JSON value is a string, base64-decode it as 8 bytes (little-endian float64) and cast to the array's on-disk dtype for comparison. If the decoded sentinel is NaN, the equality test `value == sentinel` always returns false (IEEE 754 NaN ≠ NaN); use `value.is_nan()` instead. `missing_value` is read as a plain numeric JSON value and compared normally. Integer sentinels are never NaN, so the base64 path only arises for float arrays.
 
 ### Endianness
 

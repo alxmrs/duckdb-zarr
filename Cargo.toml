@@ -1,5 +1,5 @@
 [package]
-name = "rusty_quack"
+name = "duckdb_zarr"
 version = "0.1.0"
 edition = "2021"
 
@@ -15,9 +15,21 @@ strip = true
 # src/wasm_lib.rs forwards to src/lib.rs so that we can change from cdylib
 # (that is needed while compiling natively) to staticlib (needed since the
 # actual linking will be done via emcc
-name = "rusty_quack"
+name = "duckdb_zarr"
 path = "src/wasm_lib.rs"
 crate-type = ["staticlib"]
 
 [dependencies]
 duckdb = { version = "=1.10502.0", features = ["loadable-extension"] }
+# blosc excluded: snappy_src build fails on macOS Tahoe (Darwin 25 / SDK 26.x).
+# Re-enable for v0.2 once snappy_src upstream is fixed, or switch to a pure-Rust blosc crate.
+zarrs = { version = "0.23", default-features = false, features = [
+    "ndarray",
+    "filesystem",
+    "gzip",
+    "zstd",
+    "crc32c",
+    "sharding",
+    "transpose",
+] }
+ndarray = "0.17"
