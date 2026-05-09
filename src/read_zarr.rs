@@ -6,8 +6,8 @@ use duckdb::core::{DataChunkHandle, LogicalTypeId};
 use duckdb::vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab};
 
 use crate::zarr_reader::meta::{
-    build_column_defs, build_work_units, infer_dim_groups, load_coord_array, open_store,
-    ZarrStore,
+    build_column_defs, build_work_units, infer_dim_groups, load_coord_array, open_array,
+    open_store, ZarrArray, ZarrStore,
 };
 use crate::zarr_reader::types::{ColumnDef, CoordArray, DimGroup, WorkUnit, ZarrDtype};
 
@@ -16,11 +16,12 @@ use crate::zarr_reader::types::{ColumnDef, CoordArray, DimGroup, WorkUnit, ZarrD
 // ---------------------------------------------------------------------------
 
 pub struct ReadZarrBind {
-    pub store: ZarrStore,
     pub group_shape: Vec<u64>,
     pub group_chunk_shape: Vec<u64>,
     pub columns: Vec<ColumnDef>,
     pub coord_arrays: HashMap<String, CoordArray>,
+    /// Pre-opened data-variable arrays; avoids O(n_chunks × n_vars) metadata reads.
+    pub arrays: HashMap<String, ZarrArray>,
     pub work_units: Vec<WorkUnit>,
     pub next_unit: AtomicUsize,
 }
@@ -207,14 +208,23 @@ fn finish_bind(
         bind.add_result_column(&col.name, duckdb_type);
     }
 
+    // Pre-open data variable arrays once at bind time.
+    let mut arrays: HashMap<String, ZarrArray> = HashMap::new();
+    for col in &columns {
+        if !col.is_coord {
+            let arr = open_array(&store, &col.name)?;
+            arrays.insert(col.name.clone(), arr);
+        }
+    }
+
     let work_units = build_work_units(group);
 
     Ok(ReadZarrBind {
-        store,
         group_shape: group.shape.clone(),
         group_chunk_shape: group.chunk_shape.clone(),
         columns,
         coord_arrays,
+        arrays,
         work_units,
         next_unit: AtomicUsize::new(0),
     })
@@ -234,7 +244,8 @@ fn decode_work_unit(
         if !projected.contains(&col_idx) {
             continue; // skip decompression for non-projected data vars
         }
-        let arr = crate::zarr_reader::meta::open_array(&bind.store, &col.name)?;
+        let arr = bind.arrays.get(&col.name)
+            .ok_or_else(|| format!("array '{}' not found in bind cache", col.name))?;
         // ArrayBytes<'static>: zarrs convention for requesting owned decoded bytes.
         // retrieve_chunk fills missing (implicit) chunks with fill_value automatically.
         let raw = arr.retrieve_chunk::<zarrs::array::ArrayBytes<'static>>(&wu.chunk_indices)?;
@@ -307,16 +318,10 @@ fn fill_chunk_slice(
         zarrs_strides[k] = zarrs_strides[k + 1] * zarrs_shape[k + 1];
     }
 
-    let mut dim_col_k = 0usize;
     let mut out_col_idx = 0usize;
 
     for (col_idx, col_def) in col_defs.iter().enumerate() {
-        let is_projected = projected.contains(&col_idx);
-
-        if !is_projected {
-            if col_def.is_coord {
-                dim_col_k += 1;
-            }
+        if !projected.contains(&col_idx) {
             continue;
         }
 
@@ -338,8 +343,7 @@ fn fill_chunk_slice(
             // Physical element index in the zarrs byte buffer (accounting for padding).
             let zarrs_flat: usize = (0..ndim).map(|k| dim_indices[k] * zarrs_strides[k]).sum();
 
-            if col_def.is_coord {
-                let dim_k = dim_col_k;
+            if let Some(dim_k) = col_def.dim_idx {
                 let coord_idx = global_indices[dim_k];
                 if let Some(ca) = coord_arrays.get(&col_def.name) {
                     let elem_size = ca.dtype.byte_size();
@@ -375,10 +379,6 @@ fn fill_chunk_slice(
                     vector.set_null(dst);
                 }
             }
-        }
-
-        if col_def.is_coord {
-            dim_col_k += 1;
         }
     }
 

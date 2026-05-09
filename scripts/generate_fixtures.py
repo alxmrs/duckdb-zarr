@@ -273,6 +273,38 @@ def main() -> None:
     lon_arr.attrs["_ARRAY_DIMENSIONS"] = ["lon"]
     print(f"  wrote {dest}")
 
+    # ── blosc_compressed (synthetic) ─────────────────────────────────────────
+    # Tests: Blosc/LZ4 codec support. float32 data compressed with BloscCodec.
+    # Shape (4, 6) → 24 rows; values known so we can check exact sums.
+    print("blosc_compressed (synthetic)...")
+    dest = FIXTURES / "blosc_compressed.zarr"
+    if dest.exists():
+        shutil.rmtree(dest)
+    store = zarr.open_group(str(dest), mode="w", zarr_format=3)
+    lat_vals = np.linspace(-90.0, 90.0, 4)
+    lon_vals = np.linspace(0.0, 360.0, 6, endpoint=False)
+    lat_arr = store.create_array("lat", shape=(4,), chunks=(4,), dtype="float64")
+    lat_arr[:] = lat_vals
+    lon_arr = store.create_array("lon", shape=(6,), chunks=(6,), dtype="float64")
+    lon_arr[:] = lon_vals
+    rng = np.random.default_rng(42)
+    data = rng.standard_normal((4, 6)).astype("float32")
+    temp_arr = store.create_array(
+        "temperature",
+        shape=(4, 6),
+        chunks=(4, 6),
+        dtype="float32",
+        fill_value=np.float32(0.0),
+        compressors=[zarr.codecs.BloscCodec(cname="lz4", clevel=5)],
+    )
+    temp_arr[:] = data
+    temp_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat", "lon"]
+    temp_arr.attrs["units"] = "K"
+    lat_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat"]
+    lon_arr.attrs["_ARRAY_DIMENSIONS"] = ["lon"]
+    print(f"  wrote {dest}")
+    print(f"  temperature sum (for test): {float(data.sum()):.6f}")
+
     # ── float_baseline_v2 ────────────────────────────────────────────────────
     # Same data as float_baseline but written as Zarr v2 (.zarray/.zattrs).
     # Tests: v2 store detection in list_array_names + replacement scan.

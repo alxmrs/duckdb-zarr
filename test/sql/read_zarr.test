@@ -255,3 +255,67 @@ SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/big_endian.zarr')
 WHERE temperature IS NOT NULL;
 ----
 24
+
+# ── blosc_compressed ──────────────────────────────────────────────────────────
+# Zarr v3 with Blosc/LZ4 codec. Shape (4,6) → 24 rows; all values non-null.
+# Verifies that the Blosc codec pipeline decodes correctly end-to-end.
+
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/blosc_compressed.zarr');
+----
+24
+
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/blosc_compressed.zarr')
+WHERE temperature IS NOT NULL;
+----
+24
+
+query R
+SELECT ROUND(SUM(temperature)::DOUBLE, 4)
+FROM read_zarr('test/fixtures/xarray_tutorial/blosc_compressed.zarr');
+----
+-0.4564
+
+# ── projection_pushdown ───────────────────────────────────────────────────────
+# Selecting a column subset must skip decompression for omitted data variables
+# and still return correct values for selected columns.
+
+# Select only the coordinate — no data variable decompression needed.
+query I
+SELECT COUNT(DISTINCT lat) FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr');
+----
+6
+
+# Select only a data variable — coord columns still produced for row identity.
+query I
+SELECT COUNT(*) FROM (SELECT temperature FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr'));
+----
+576
+
+# Values are correct when only one column selected from a packed-int store.
+# air values decoded from int16 with scale_factor=0.01 → range 150–400 K.
+query I
+SELECT COUNT(*) FROM (SELECT air FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr'))
+WHERE air > 150.0 AND air < 400.0;
+----
+3869000
+
+# Selecting a coord from a multi-var store leaves the other data var unread.
+query I
+SELECT COUNT(DISTINCT time) FROM read_zarr('test/fixtures/xarray_tutorial/air_temperature.zarr');
+----
+2920
+
+# Project lat+lon only (both coords, no data variable) from float_baseline.
+query II rowsort
+SELECT MIN(lat), MAX(lat) FROM (SELECT lat, lon FROM read_zarr('test/fixtures/xarray_tutorial/float_baseline.zarr'));
+----
+-90.000000	90.000000
+
+# Single column from sparse store: NULL masking still applied.
+query I
+SELECT COUNT(*) FROM (SELECT data FROM read_zarr('test/fixtures/xarray_tutorial/sparse.zarr'))
+WHERE data IS NULL;
+----
+12

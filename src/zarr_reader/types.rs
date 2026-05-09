@@ -111,6 +111,9 @@ pub struct ColumnDef {
     pub encoding: ColumnEncoding,
     pub sentinel: Option<FillSentinel>,
     pub is_coord: bool,
+    /// For coord columns: the dimension index this coord maps to in group.dims.
+    /// None for data variable columns.
+    pub dim_idx: Option<usize>,
 }
 
 /// One dim group: arrays sharing an identical ordered dimension set.
