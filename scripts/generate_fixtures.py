@@ -443,6 +443,41 @@ def main() -> None:
     print(f"  wrote {dest}")
     print(f"  temperature sum (for test): {float(data.sum()):.6f}")
 
+    # ── blosc_multichunk (synthetic) ─────────────────────────────────────────
+    # Tests: Blosc codec across multiple chunks — exercises chunk-boundary
+    # reassembly and correct zarrs_stride math for non-square boundary chunks.
+    # Shape (8, 12), chunks (4, 6) → 4 chunks (2×2 grid), 96 rows total.
+    print("blosc_multichunk (synthetic)...")
+    dest = FIXTURES / "blosc_multichunk.zarr"
+    if dest.exists():
+        shutil.rmtree(dest)
+    store = zarr.open_group(str(dest), mode="w", zarr_format=3)
+    lat_vals = np.linspace(-90.0, 90.0, 8)
+    lon_vals = np.linspace(0.0, 360.0, 12, endpoint=False)
+    lat_arr = store.create_array("lat", shape=(8,), chunks=(8,), dtype="float64")
+    lat_arr[:] = lat_vals
+    lon_arr = store.create_array("lon", shape=(12,), chunks=(12,), dtype="float64")
+    lon_arr[:] = lon_vals
+    rng = np.random.default_rng(77)
+    data = rng.standard_normal((8, 12)).astype("float32")
+    temp_arr = store.create_array(
+        "temperature",
+        shape=(8, 12),
+        chunks=(4, 6),
+        dtype="float32",
+        fill_value=np.float32(0.0),
+        compressors=[zarr.codecs.BloscCodec(cname="lz4", clevel=5)],
+    )
+    temp_arr[:] = data
+    temp_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat", "lon"]
+    temp_arr.attrs["units"] = "K"
+    lat_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat"]
+    lon_arr.attrs["_ARRAY_DIMENSIONS"] = ["lon"]
+    print(f"  wrote {dest}")
+    print(f"  temperature sum (for test): {float(data.sum()):.6f}")
+    print(f"  temperature[0,0] (for test): {float(data[0,0]):.6f}")
+    print(f"  temperature[4,6] (for test): {float(data[4,6]):.6f}")
+
     # ── float_baseline_v2 ────────────────────────────────────────────────────
     # Same data as float_baseline but written as Zarr v2 (.zarray/.zattrs).
     # Tests: v2 store detection in list_array_names + replacement scan.
