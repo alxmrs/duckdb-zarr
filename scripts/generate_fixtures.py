@@ -23,10 +23,19 @@ base64 when it encounters a string value; for NaN sentinels use is_nan().
 import os
 import pathlib
 import shutil
+import stat
 
 # zarr 2.x gates v3 writes behind an env var; zarr 3.x ignores it.
 # Must be set before zarr is imported.
 os.environ.setdefault('ZARR_V3_EXPERIMENTAL_API', '1')
+
+
+def _rmtree(path: pathlib.Path) -> None:
+    """Remove a directory tree, force-unlocking read-only files (e.g. CI caches)."""
+    def _fix_readonly(func, fpath, _):
+        os.chmod(fpath, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+        func(fpath)
+    shutil.rmtree(path, onerror=_fix_readonly)
 
 import numpy as np
 import xarray as xr
@@ -39,7 +48,7 @@ FIXTURES = ROOT / "test" / "fixtures" / "xarray_tutorial"
 def write_zarr(ds: xr.Dataset, name: str, encoding: dict | None = None) -> None:
     dest = FIXTURES / f"{name}.zarr"
     if dest.exists():
-        shutil.rmtree(dest)
+        _rmtree(dest)
     ds.to_zarr(dest, zarr_format=3, consolidated=False, encoding=encoding or {})
     print(f"  wrote {dest}")
 
@@ -225,7 +234,7 @@ def main() -> None:
     print("sparse (synthetic)...")
     dest = FIXTURES / "sparse.zarr"
     if dest.exists():
-        shutil.rmtree(dest)
+        _rmtree(dest)
     store = zarr.open_group(str(dest), mode="w", zarr_format=3)
     lat_vals = np.linspace(-90.0, 90.0, 4)
     lon_vals = np.linspace(0.0, 360.0, 4, endpoint=False)
@@ -250,7 +259,7 @@ def main() -> None:
     print("big_endian (synthetic)...")
     dest = FIXTURES / "big_endian.zarr"
     if dest.exists():
-        shutil.rmtree(dest)
+        _rmtree(dest)
     store = zarr.open_group(str(dest), mode="w", zarr_format=3)
     lat_vals = np.linspace(-90.0, 90.0, 4)
     lon_vals = np.linspace(0.0, 360.0, 6, endpoint=False)
@@ -284,7 +293,7 @@ def main() -> None:
     print("blosc_compressed (synthetic)...")
     dest = FIXTURES / "blosc_compressed.zarr"
     if dest.exists():
-        shutil.rmtree(dest)
+        _rmtree(dest)
     store = zarr.open_group(str(dest), mode="w", zarr_format=3)
     lat_vals = np.linspace(-90.0, 90.0, 4)
     lon_vals = np.linspace(0.0, 360.0, 6, endpoint=False)
@@ -317,7 +326,7 @@ def main() -> None:
     print("blosc_multichunk (synthetic)...")
     dest = FIXTURES / "blosc_multichunk.zarr"
     if dest.exists():
-        shutil.rmtree(dest)
+        _rmtree(dest)
     store = zarr.open_group(str(dest), mode="w", zarr_format=3)
     lat_vals = np.linspace(-90.0, 90.0, 8)
     lon_vals = np.linspace(0.0, 360.0, 12, endpoint=False)
@@ -359,7 +368,7 @@ def main() -> None:
                       attrs={"units": "K", "long_name": "temperature"})
     dest = FIXTURES / "float_baseline_v2.zarr"
     if dest.exists():
-        shutil.rmtree(dest)
+        _rmtree(dest)
     # Use gzip instead of the default blosc; blosc build fails on macOS Tahoe.
     v2_enc = {v: {"compressor": {"id": "gzip", "level": 1}}
               for v in ("temperature", "lat", "lon", "time")}
