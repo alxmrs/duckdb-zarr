@@ -102,10 +102,13 @@ impl VTab for ReadZarrVTab {
     }
 
     fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
-        let mut indices: Vec<usize> = init.get_column_indices().into_iter().map(|i| i as usize).collect();
-        indices.sort_unstable();
-        let projected_cols: HashMap<usize, usize> = indices.into_iter().enumerate()
-            .map(|(out_idx, col_idx)| (col_idx, out_idx))
+        // DuckDB guarantees output.flat_vector(i) in scan() corresponds to
+        // get_column_indices()[i] from init(). Do NOT sort — sorting destroys
+        // the positional relationship and scrambles output in JOIN context.
+        let projected_cols: HashMap<usize, usize> = init.get_column_indices()
+            .into_iter()
+            .enumerate()
+            .map(|(out_idx, col_idx)| (col_idx as usize, out_idx))
             .collect();
         Ok(ReadZarrInit {
             projected_cols,

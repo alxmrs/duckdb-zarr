@@ -32,6 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - require python>=3.11 in pyproject.toml so uv uses zarr 3.x on CI (#132)
 - port h5py + ZARR_V3_EXPERIMENTAL_API fixes from impl-v2-half to impl-v2 (#131)
 - fix generate_fixtures.py: set ZARR_V3_EXPERIMENTAL_API=1 for zarr 2.x compatibility on Python 3.10 CI (#130)
+- fix projection pushdown: sort in init() destroys col_idx→out_vec_idx mapping in JOIN context (#129)
+- add h5py to pyproject.toml dependencies (required by h5netcdf for ersstv5 fixture) (#128)
 
 - `copy_scalar!` macro used `from_le_bytes` but zarrs returns native-endian bytes (#75)
 - `read_zarr_metadata` paginated scan silently truncated stores with >2048 arrays (#76)
