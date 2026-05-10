@@ -20,8 +20,13 @@ zarr.json fill_value and plain JSON numbers in attrs. missing_value attr stays
 as a plain JSON number (not base64). The Rust reader must handle _FillValue as
 base64 when it encounters a string value; for NaN sentinels use is_nan().
 """
+import os
 import pathlib
 import shutil
+
+# zarr 2.x gates v3 writes behind an env var; zarr 3.x ignores it.
+# Must be set before zarr is imported.
+os.environ.setdefault('ZARR_V3_EXPERIMENTAL_API', '1')
 
 import numpy as np
 import xarray as xr
