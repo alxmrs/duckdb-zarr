@@ -64,6 +64,9 @@ FIXTURES = ROOT / "test" / "fixtures" / "xarray_tutorial"
 
 def write_zarr(ds: xr.Dataset, name: str, encoding: dict | None = None) -> None:
     dest = FIXTURES / f"{name}.zarr"
+    if (dest / "zarr.json").exists():
+        print(f"  (cached) {dest}")
+        return
     if dest.exists():
         _rmtree(dest)
     ds.to_zarr(dest, zarr_format=3, consolidated=False, encoding=encoding or {})
@@ -250,24 +253,27 @@ def main() -> None:
     # Only the first quadrant (chunk [0,0]) is written; the other 3 are absent.
     print("sparse (synthetic)...")
     dest = FIXTURES / "sparse.zarr"
-    if dest.exists():
-        _rmtree(dest)
-    store = zarr.open_group(str(dest), mode="w", zarr_format=3)
-    lat_vals = np.linspace(-90.0, 90.0, 4)
-    lon_vals = np.linspace(0.0, 360.0, 4, endpoint=False)
-    lat_arr = store.create_array("lat", shape=(4,), chunks=(4,), dtype="float64")
-    lat_arr[:] = lat_vals
-    lon_arr = store.create_array("lon", shape=(4,), chunks=(4,), dtype="float64")
-    lon_arr[:] = lon_vals
-    data_arr = store.create_array(
-        "data", shape=(4, 4), chunks=(2, 2), dtype="float32", fill_value=-9999.0,
-    )
-    # Write only chunk [0,0]; leave [0,1], [1,0], [1,1] implicit.
-    data_arr[0:2, 0:2] = np.ones((2, 2), dtype="float32")
-    data_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat", "lon"]
-    lat_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat"]
-    lon_arr.attrs["_ARRAY_DIMENSIONS"] = ["lon"]
-    print(f"  wrote {dest}")
+    if (dest / "zarr.json").exists():
+        print(f"  (cached) {dest}")
+    else:
+        if dest.exists():
+            _rmtree(dest)
+        store = zarr.open_group(str(dest), mode="w", zarr_format=3)
+        lat_vals = np.linspace(-90.0, 90.0, 4)
+        lon_vals = np.linspace(0.0, 360.0, 4, endpoint=False)
+        lat_arr = store.create_array("lat", shape=(4,), chunks=(4,), dtype="float64")
+        lat_arr[:] = lat_vals
+        lon_arr = store.create_array("lon", shape=(4,), chunks=(4,), dtype="float64")
+        lon_arr[:] = lon_vals
+        data_arr = store.create_array(
+            "data", shape=(4, 4), chunks=(2, 2), dtype="float32", fill_value=-9999.0,
+        )
+        # Write only chunk [0,0]; leave [0,1], [1,0], [1,1] implicit.
+        data_arr[0:2, 0:2] = np.ones((2, 2), dtype="float32")
+        data_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat", "lon"]
+        lat_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat"]
+        lon_arr.attrs["_ARRAY_DIMENSIONS"] = ["lon"]
+        print(f"  wrote {dest}")
 
     # ── big_endian (synthetic) ───────────────────────────────────────────────
     # Tests: big-endian arrays — zarrs decodes to native byte order, so the copy
@@ -275,66 +281,72 @@ def main() -> None:
     # interprets bytes before zarrs normalises endianness.
     print("big_endian (synthetic)...")
     dest = FIXTURES / "big_endian.zarr"
-    if dest.exists():
-        _rmtree(dest)
-    store = zarr.open_group(str(dest), mode="w", zarr_format=3)
-    lat_vals = np.linspace(-90.0, 90.0, 4)
-    lon_vals = np.linspace(0.0, 360.0, 6, endpoint=False)
-    lat_arr = store.create_array("lat", shape=(4,), chunks=(4,), dtype="float64")
-    lat_arr[:] = lat_vals
-    lon_arr = store.create_array("lon", shape=(6,), chunks=(6,), dtype="float64")
-    lon_arr[:] = lon_vals
-    rng = np.random.default_rng(99)
-    data = rng.standard_normal((4, 6)).astype("float32")
-    temp_arr = store.create_array(
-        "temperature",
-        shape=(4, 6),
-        chunks=(4, 6),
-        dtype="float32",
-        fill_value=np.float32(0.0),
-        # Explicitly request big-endian bytes codec — zarr-python 3.x ignores
-        # the ">f4" dtype prefix and defaults to little-endian otherwise.
-        serializer=zarr.codecs.BytesCodec(endian="big"),
-        compressors=[zarr.codecs.ZstdCodec()],
-    )
-    temp_arr[:] = data
-    temp_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat", "lon"]
-    temp_arr.attrs["units"] = "K"
-    lat_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat"]
-    lon_arr.attrs["_ARRAY_DIMENSIONS"] = ["lon"]
-    print(f"  wrote {dest}")
+    if (dest / "zarr.json").exists():
+        print(f"  (cached) {dest}")
+    else:
+        if dest.exists():
+            _rmtree(dest)
+        store = zarr.open_group(str(dest), mode="w", zarr_format=3)
+        lat_vals = np.linspace(-90.0, 90.0, 4)
+        lon_vals = np.linspace(0.0, 360.0, 6, endpoint=False)
+        lat_arr = store.create_array("lat", shape=(4,), chunks=(4,), dtype="float64")
+        lat_arr[:] = lat_vals
+        lon_arr = store.create_array("lon", shape=(6,), chunks=(6,), dtype="float64")
+        lon_arr[:] = lon_vals
+        rng = np.random.default_rng(99)
+        data = rng.standard_normal((4, 6)).astype("float32")
+        temp_arr = store.create_array(
+            "temperature",
+            shape=(4, 6),
+            chunks=(4, 6),
+            dtype="float32",
+            fill_value=np.float32(0.0),
+            # Explicitly request big-endian bytes codec — zarr-python 3.x ignores
+            # the ">f4" dtype prefix and defaults to little-endian otherwise.
+            serializer=zarr.codecs.BytesCodec(endian="big"),
+            compressors=[zarr.codecs.ZstdCodec()],
+        )
+        temp_arr[:] = data
+        temp_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat", "lon"]
+        temp_arr.attrs["units"] = "K"
+        lat_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat"]
+        lon_arr.attrs["_ARRAY_DIMENSIONS"] = ["lon"]
+        print(f"  wrote {dest}")
 
     # ── blosc_compressed (synthetic) ─────────────────────────────────────────
     # Tests: Blosc/LZ4 codec support. float32 data compressed with BloscCodec.
     # Shape (4, 6) → 24 rows; values known so we can check exact sums.
     print("blosc_compressed (synthetic)...")
     dest = FIXTURES / "blosc_compressed.zarr"
-    if dest.exists():
-        _rmtree(dest)
-    store = zarr.open_group(str(dest), mode="w", zarr_format=3)
-    lat_vals = np.linspace(-90.0, 90.0, 4)
-    lon_vals = np.linspace(0.0, 360.0, 6, endpoint=False)
-    lat_arr = store.create_array("lat", shape=(4,), chunks=(4,), dtype="float64")
-    lat_arr[:] = lat_vals
-    lon_arr = store.create_array("lon", shape=(6,), chunks=(6,), dtype="float64")
-    lon_arr[:] = lon_vals
-    rng = np.random.default_rng(42)
-    data = rng.standard_normal((4, 6)).astype("float32")
-    temp_arr = store.create_array(
-        "temperature",
-        shape=(4, 6),
-        chunks=(4, 6),
-        dtype="float32",
-        fill_value=np.float32(0.0),
-        compressors=[zarr.codecs.BloscCodec(cname="lz4", clevel=5)],
-    )
-    temp_arr[:] = data
-    temp_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat", "lon"]
-    temp_arr.attrs["units"] = "K"
-    lat_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat"]
-    lon_arr.attrs["_ARRAY_DIMENSIONS"] = ["lon"]
-    print(f"  wrote {dest}")
-    print(f"  temperature sum (for test): {float(data.sum()):.6f}")
+    if (dest / "zarr.json").exists():
+        print(f"  (cached) {dest}")
+    else:
+        if dest.exists():
+            _rmtree(dest)
+        store = zarr.open_group(str(dest), mode="w", zarr_format=3)
+        lat_vals = np.linspace(-90.0, 90.0, 4)
+        lon_vals = np.linspace(0.0, 360.0, 6, endpoint=False)
+        lat_arr = store.create_array("lat", shape=(4,), chunks=(4,), dtype="float64")
+        lat_arr[:] = lat_vals
+        lon_arr = store.create_array("lon", shape=(6,), chunks=(6,), dtype="float64")
+        lon_arr[:] = lon_vals
+        rng = np.random.default_rng(42)
+        data = rng.standard_normal((4, 6)).astype("float32")
+        temp_arr = store.create_array(
+            "temperature",
+            shape=(4, 6),
+            chunks=(4, 6),
+            dtype="float32",
+            fill_value=np.float32(0.0),
+            compressors=[zarr.codecs.BloscCodec(cname="lz4", clevel=5)],
+        )
+        temp_arr[:] = data
+        temp_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat", "lon"]
+        temp_arr.attrs["units"] = "K"
+        lat_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat"]
+        lon_arr.attrs["_ARRAY_DIMENSIONS"] = ["lon"]
+        print(f"  wrote {dest}")
+        print(f"  temperature sum (for test): {float(data.sum()):.6f}")
 
     # ── blosc_multichunk (synthetic) ─────────────────────────────────────────
     # Tests: Blosc codec across multiple chunks — exercises chunk-boundary
@@ -342,56 +354,62 @@ def main() -> None:
     # Shape (8, 12), chunks (4, 6) → 4 chunks (2×2 grid), 96 rows total.
     print("blosc_multichunk (synthetic)...")
     dest = FIXTURES / "blosc_multichunk.zarr"
-    if dest.exists():
-        _rmtree(dest)
-    store = zarr.open_group(str(dest), mode="w", zarr_format=3)
-    lat_vals = np.linspace(-90.0, 90.0, 8)
-    lon_vals = np.linspace(0.0, 360.0, 12, endpoint=False)
-    lat_arr = store.create_array("lat", shape=(8,), chunks=(8,), dtype="float64")
-    lat_arr[:] = lat_vals
-    lon_arr = store.create_array("lon", shape=(12,), chunks=(12,), dtype="float64")
-    lon_arr[:] = lon_vals
-    rng = np.random.default_rng(77)
-    data = rng.standard_normal((8, 12)).astype("float32")
-    temp_arr = store.create_array(
-        "temperature",
-        shape=(8, 12),
-        chunks=(4, 6),
-        dtype="float32",
-        fill_value=np.float32(0.0),
-        compressors=[zarr.codecs.BloscCodec(cname="lz4", clevel=5)],
-    )
-    temp_arr[:] = data
-    temp_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat", "lon"]
-    temp_arr.attrs["units"] = "K"
-    lat_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat"]
-    lon_arr.attrs["_ARRAY_DIMENSIONS"] = ["lon"]
-    print(f"  wrote {dest}")
-    print(f"  temperature sum (for test): {float(data.sum()):.6f}")
-    print(f"  temperature[0,0] (for test): {float(data[0,0]):.6f}")
-    print(f"  temperature[4,6] (for test): {float(data[4,6]):.6f}")
+    if (dest / "zarr.json").exists():
+        print(f"  (cached) {dest}")
+    else:
+        if dest.exists():
+            _rmtree(dest)
+        store = zarr.open_group(str(dest), mode="w", zarr_format=3)
+        lat_vals = np.linspace(-90.0, 90.0, 8)
+        lon_vals = np.linspace(0.0, 360.0, 12, endpoint=False)
+        lat_arr = store.create_array("lat", shape=(8,), chunks=(8,), dtype="float64")
+        lat_arr[:] = lat_vals
+        lon_arr = store.create_array("lon", shape=(12,), chunks=(12,), dtype="float64")
+        lon_arr[:] = lon_vals
+        rng = np.random.default_rng(77)
+        data = rng.standard_normal((8, 12)).astype("float32")
+        temp_arr = store.create_array(
+            "temperature",
+            shape=(8, 12),
+            chunks=(4, 6),
+            dtype="float32",
+            fill_value=np.float32(0.0),
+            compressors=[zarr.codecs.BloscCodec(cname="lz4", clevel=5)],
+        )
+        temp_arr[:] = data
+        temp_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat", "lon"]
+        temp_arr.attrs["units"] = "K"
+        lat_arr.attrs["_ARRAY_DIMENSIONS"] = ["lat"]
+        lon_arr.attrs["_ARRAY_DIMENSIONS"] = ["lon"]
+        print(f"  wrote {dest}")
+        print(f"  temperature sum (for test): {float(data.sum()):.6f}")
+        print(f"  temperature[0,0] (for test): {float(data[0,0]):.6f}")
+        print(f"  temperature[4,6] (for test): {float(data[4,6]):.6f}")
 
     # ── float_baseline_v2 ────────────────────────────────────────────────────
     # Same data as float_baseline but written as Zarr v2 (.zarray/.zattrs).
     # Tests: v2 store detection in list_array_names + replacement scan.
     print("float_baseline_v2 (zarr v2)...")
-    rng = np.random.default_rng(0)
-    data = rng.standard_normal((8, 6, 12)).astype("float32")
-    lat = np.linspace(-90.0, 90.0, 6)
-    lon = np.linspace(0.0, 360.0, 12, endpoint=False)
-    time = np.arange(8, dtype="int64")
-    da = xr.DataArray(data, dims=["time", "lat", "lon"],
-                      coords={"time": time, "lat": lat, "lon": lon},
-                      attrs={"units": "K", "long_name": "temperature"})
     dest = FIXTURES / "float_baseline_v2.zarr"
-    if dest.exists():
-        _rmtree(dest)
-    # Use gzip instead of the default blosc; blosc build fails on macOS Tahoe.
-    v2_enc = {v: {"compressor": {"id": "gzip", "level": 1}}
-              for v in ("temperature", "lat", "lon", "time")}
-    xr.Dataset({"temperature": da}).to_zarr(
-        dest, zarr_format=2, consolidated=False, encoding=v2_enc)
-    print(f"  wrote {dest}")
+    if (dest / ".zattrs").exists():
+        print(f"  (cached) {dest}")
+    else:
+        if dest.exists():
+            _rmtree(dest)
+        rng = np.random.default_rng(0)
+        data = rng.standard_normal((8, 6, 12)).astype("float32")
+        lat = np.linspace(-90.0, 90.0, 6)
+        lon = np.linspace(0.0, 360.0, 12, endpoint=False)
+        time = np.arange(8, dtype="int64")
+        da = xr.DataArray(data, dims=["time", "lat", "lon"],
+                          coords={"time": time, "lat": lat, "lon": lon},
+                          attrs={"units": "K", "long_name": "temperature"})
+        # Use gzip instead of the default blosc; blosc build fails on macOS Tahoe.
+        v2_enc = {v: {"compressor": {"id": "gzip", "level": 1}}
+                  for v in ("temperature", "lat", "lon", "time")}
+        xr.Dataset({"temperature": da}).to_zarr(
+            dest, zarr_format=2, consolidated=False, encoding=v2_enc)
+        print(f"  wrote {dest}")
 
     print("\nAll fixtures written.")
 
