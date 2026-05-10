@@ -9,6 +9,7 @@ dependencies = [
     "zarr",
     "scipy",
     "h5netcdf",
+    "h5py",
     "pooch",
     "zstandard",
 ]

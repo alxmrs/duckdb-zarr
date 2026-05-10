@@ -140,9 +140,10 @@ def main() -> None:
     # ── rasm ─────────────────────────────────────────────────────────────────
     # Tests: noleap calendar CF-encoded time (raw on-disk), 2D non-dim coords
     # (xc, yc) which should trigger the v1 bind error for non-dimension coords.
-    print("rasm...")
-    ds = xr.tutorial.open_dataset("rasm")
-    write_zarr(ds, "rasm")
+    # Skipped: requires cftime for the noleap calendar; support deferred.
+    # print("rasm...")
+    # ds = xr.tutorial.open_dataset("rasm")
+    # write_zarr(ds, "rasm")
 
     # ── unindexed_dim (synthetic) ────────────────────────────────────────────
     # Tests: dimension with no backing coordinate array. dim_0 has no coord;

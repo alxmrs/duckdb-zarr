@@ -29,6 +29,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - zarrs 0.23 Cargo feature audit (#27)
 
 ### Fixed
+- port h5py + ZARR_V3_EXPERIMENTAL_API fixes from impl-v2-half to impl-v2 (#131)
 - fix generate_fixtures.py: set ZARR_V3_EXPERIMENTAL_API=1 for zarr 2.x compatibility on Python 3.10 CI (#130)
 
 - `copy_scalar!` macro used `from_le_bytes` but zarrs returns native-endian bytes (#75)
