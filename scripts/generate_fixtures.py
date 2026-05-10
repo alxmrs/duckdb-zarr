@@ -20,10 +20,11 @@ zarr.json fill_value and plain JSON numbers in attrs. missing_value attr stays
 as a plain JSON number (not base64). The Rust reader must handle _FillValue as
 base64 when it encounters a string value; for NaN sentinels use is_nan().
 """
+import contextlib
 import os
 import pathlib
 import shutil
-import stat
+import subprocess
 
 # zarr 2.x gates v3 writes behind an env var; zarr 3.x ignores it.
 # Must be set before zarr is imported.
@@ -31,19 +32,27 @@ os.environ.setdefault('ZARR_V3_EXPERIMENTAL_API', '1')
 
 
 def _rmtree(path: pathlib.Path) -> None:
-    """Remove a directory tree, handling read-only or root-owned files in CI.
+    """Remove a directory tree, handling root-owned files from Docker CI steps.
 
-    On Linux, unlinking a file only requires write permission on the parent
-    directory — not ownership of the file itself. So we attempt chmod (best
-    effort) and then call the original func regardless.
+    Strategy:
+    1. chmod parent dir (unlink needs parent write perm) + file, both best-effort.
+    2. Call the original func (unlink/rmdir).
+    3. If shutil.rmtree still raises PermissionError, fall back to
+       `sudo rm -rf` — passwordless on GitHub Actions Ubuntu runners.
     """
+    if not path.exists():
+        return
+
     def _fix_readonly(func, fpath, _):
-        try:
-            os.chmod(fpath, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
-        except OSError:
-            pass  # chmod requires ownership; unlink may still succeed
+        for p in (os.path.dirname(fpath), fpath):
+            with contextlib.suppress(OSError):
+                os.chmod(p, 0o755)
         func(fpath)
-    shutil.rmtree(path, onerror=_fix_readonly)
+
+    try:
+        shutil.rmtree(path, onerror=_fix_readonly)
+    except PermissionError:
+        subprocess.run(['sudo', 'rm', '-rf', str(path)], check=False)
 
 import numpy as np
 import xarray as xr
