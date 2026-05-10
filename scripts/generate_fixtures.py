@@ -31,9 +31,17 @@ os.environ.setdefault('ZARR_V3_EXPERIMENTAL_API', '1')
 
 
 def _rmtree(path: pathlib.Path) -> None:
-    """Remove a directory tree, force-unlocking read-only files (e.g. CI caches)."""
+    """Remove a directory tree, handling read-only or root-owned files in CI.
+
+    On Linux, unlinking a file only requires write permission on the parent
+    directory — not ownership of the file itself. So we attempt chmod (best
+    effort) and then call the original func regardless.
+    """
     def _fix_readonly(func, fpath, _):
-        os.chmod(fpath, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+        try:
+            os.chmod(fpath, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+        except OSError:
+            pass  # chmod requires ownership; unlink may still succeed
         func(fpath)
     shutil.rmtree(path, onerror=_fix_readonly)
 
