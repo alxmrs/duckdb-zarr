@@ -37,6 +37,10 @@ ndarray = "0.17"
 serde_json = "1"
 base64 = "0.22"
 zarrs_http = "0.3.1"
+# zarrs_http → reqwest → native-tls → openssl-sys. The DuckDB CI sets OPENSSL_DIR
+# to a vcpkg path that doesn't exist unless openssl is explicitly installed.
+# Vendored mode compiles OpenSSL from source and ignores OPENSSL_DIR entirely.
+openssl = { version = "0.10", features = ["vendored"] }
 
 # Enable blosc everywhere except x86_64-pc-windows-gnu (Rtools42/mingw).
 # SKIP_TESTS=1 for that target so blosc is never exercised there in CI.
