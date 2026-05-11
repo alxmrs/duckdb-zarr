@@ -458,7 +458,7 @@ pub fn build_column_defs(
     let mut cols = Vec::new();
 
     // Dimension columns (coords or synthesized integers).
-    for dim in &group.dims {
+    for (dim_idx, dim) in group.dims.iter().enumerate() {
         if let Some(ca) = coord_arrays.get(dim) {
             cols.push(ColumnDef {
                 name: dim.clone(),
@@ -466,6 +466,7 @@ pub fn build_column_defs(
                 encoding: ca.encoding.clone(),
                 sentinel: ca.sentinel.clone(),
                 is_coord: true,
+                dim_idx: Some(dim_idx),
             });
         } else {
             // Unindexed dim → synthesize 0..N integer range (Int64).
@@ -476,6 +477,7 @@ pub fn build_column_defs(
                 encoding: ColumnEncoding::Plain,
                 sentinel: None,
                 is_coord: true,
+                dim_idx: Some(dim_idx),
             });
         }
     }
@@ -493,6 +495,7 @@ pub fn build_column_defs(
             encoding,
             sentinel,
             is_coord: false,
+            dim_idx: None,
         });
     }
 

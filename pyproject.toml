@@ -1,0 +1,23 @@
+[project]
+name = "duckdb-zarr"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb",
+    "numpy",
+    "xarray",
+    "zarr",
+    "scipy",
+    "h5netcdf",
+    "h5py",
+    "pooch",
+    "zstandard",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.uv]
+package = false

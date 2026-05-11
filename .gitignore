@@ -5,6 +5,8 @@ configure
 duckdb_unittest_tempdir
 /test/bin
 venv
+.venv
+__pycache__
 .chainlink/
 .claude/
 .mcp.json

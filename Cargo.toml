@@ -21,8 +21,9 @@ crate-type = ["staticlib"]
 
 [dependencies]
 duckdb = { version = "=1.10502.0", features = ["loadable-extension"] }
-# blosc excluded: snappy_src build fails on macOS Tahoe (Darwin 25 / SDK 26.x).
-# Re-enable for v0.2 once snappy_src upstream is fixed, or switch to a pure-Rust blosc crate.
+# Base zarrs features: no blosc here — blosc_src bundles pthreads that conflict
+# with Rtools42's libpthread on windows_amd64_mingw (x86_64-pc-windows-gnu).
+# Blosc is re-added below for all other targets.
 zarrs = { version = "0.23", default-features = false, features = [
     "ndarray",
     "filesystem",
@@ -35,3 +36,8 @@ zarrs = { version = "0.23", default-features = false, features = [
 ndarray = "0.17"
 serde_json = "1"
 base64 = "0.22"
+
+# Enable blosc everywhere except x86_64-pc-windows-gnu (Rtools42/mingw).
+# SKIP_TESTS=1 for that target so blosc is never exercised there in CI.
+[target.'cfg(not(all(target_os = "windows", target_env = "gnu")))'.dependencies]
+zarrs = { version = "0.23", default-features = false, features = ["blosc"] }

@@ -6,8 +6,8 @@ use duckdb::core::{DataChunkHandle, LogicalTypeId};
 use duckdb::vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab};
 
 use crate::zarr_reader::meta::{
-    build_column_defs, build_work_units, infer_dim_groups, load_coord_array, open_store,
-    ZarrStore,
+    build_column_defs, build_work_units, infer_dim_groups, load_coord_array, open_array,
+    open_store, ZarrArray, ZarrStore,
 };
 use crate::zarr_reader::types::{ColumnDef, CoordArray, DimGroup, WorkUnit, ZarrDtype};
 
@@ -16,16 +16,18 @@ use crate::zarr_reader::types::{ColumnDef, CoordArray, DimGroup, WorkUnit, ZarrD
 // ---------------------------------------------------------------------------
 
 pub struct ReadZarrBind {
-    pub store: ZarrStore,
     pub group_shape: Vec<u64>,
     pub group_chunk_shape: Vec<u64>,
     pub columns: Vec<ColumnDef>,
     pub coord_arrays: HashMap<String, CoordArray>,
+    /// Pre-opened data-variable arrays; avoids O(n_chunks × n_vars) metadata reads.
+    pub arrays: HashMap<String, ZarrArray>,
     pub work_units: Vec<WorkUnit>,
     pub next_unit: AtomicUsize,
 }
 
-// SAFETY: AtomicUsize is Send+Sync. Other fields are pure data.
+// SAFETY: All fields are Send+Sync: AtomicUsize, HashMap with Send values, Vec.
+// DuckDB calls bind once; the resulting data is read-only during scan.
 unsafe impl Send for ReadZarrBind {}
 unsafe impl Sync for ReadZarrBind {}
 
@@ -34,6 +36,9 @@ unsafe impl Sync for ReadZarrBind {}
 // ---------------------------------------------------------------------------
 
 pub struct ReadZarrInit {
+    /// Maps schema column index → output-vector index (sorted by schema index).
+    /// Explicit mapping avoids any assumption about the order DuckDB returns projected indices.
+    pub projected_cols: HashMap<usize, usize>,
     pub inner: Mutex<LocalState>,
 }
 
@@ -49,6 +54,8 @@ pub struct LocalState {
     pub done: bool,
 }
 
+// SAFETY: projected_cols is written once at init and read-only thereafter.
+// inner is a Mutex<LocalState>, so concurrent access is synchronized.
 unsafe impl Send for ReadZarrInit {}
 unsafe impl Sync for ReadZarrInit {}
 
@@ -90,8 +97,18 @@ impl VTab for ReadZarrVTab {
         finish_bind(bind, store, group)
     }
 
-    fn init(_init: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
+    fn supports_pushdown() -> bool {
+        true
+    }
+
+    fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
+        let mut indices: Vec<usize> = init.get_column_indices().into_iter().map(|i| i as usize).collect();
+        indices.sort_unstable();
+        let projected_cols: HashMap<usize, usize> = indices.into_iter().enumerate()
+            .map(|(out_idx, col_idx)| (col_idx, out_idx))
+            .collect();
         Ok(ReadZarrInit {
+            projected_cols,
             inner: Mutex::new(LocalState {
                 current_unit_idx: usize::MAX,
                 current_chunk_bytes: HashMap::new(),
@@ -108,6 +125,7 @@ impl VTab for ReadZarrVTab {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let bind = func.get_bind_data();
         let init = func.get_init_data();
+        let projected = &init.projected_cols;
         let mut state = init.inner.lock().unwrap();
 
         if state.done {
@@ -129,7 +147,7 @@ impl VTab for ReadZarrVTab {
                 }
                 let wu = &bind.work_units[unit_idx];
                 // Decode chunk for each data variable.
-                let chunk_bytes = decode_work_unit(bind, wu)?;
+                let chunk_bytes = decode_work_unit(bind, wu, projected)?;
                 let chunk_rows = compute_chunk_rows(wu, &bind.group_shape, &bind.group_chunk_shape);
                 state.current_unit_idx = unit_idx;
                 state.current_chunk_bytes = chunk_bytes;
@@ -158,6 +176,7 @@ impl VTab for ReadZarrVTab {
                 rows_written,
                 state.row_cursor,
                 can_write,
+                projected,
             );
 
             state.row_cursor += written;
@@ -197,14 +216,23 @@ fn finish_bind(
         bind.add_result_column(&col.name, duckdb_type);
     }
 
+    // Pre-open data variable arrays once at bind time.
+    let mut arrays: HashMap<String, ZarrArray> = HashMap::new();
+    for col in &columns {
+        if !col.is_coord {
+            let arr = open_array(&store, &col.name)?;
+            arrays.insert(col.name.clone(), arr);
+        }
+    }
+
     let work_units = build_work_units(group);
 
     Ok(ReadZarrBind {
-        store,
         group_shape: group.shape.clone(),
         group_chunk_shape: group.chunk_shape.clone(),
         columns,
         coord_arrays,
+        arrays,
         work_units,
         next_unit: AtomicUsize::new(0),
     })
@@ -213,14 +241,19 @@ fn finish_bind(
 fn decode_work_unit(
     bind: &ReadZarrBind,
     wu: &WorkUnit,
+    projected: &HashMap<usize, usize>,
 ) -> Result<HashMap<String, Vec<u8>>, Box<dyn std::error::Error>> {
     let mut chunk_bytes = HashMap::new();
 
-    for col in &bind.columns {
+    for (col_idx, col) in bind.columns.iter().enumerate() {
         if col.is_coord {
             continue; // coord data is pre-loaded at bind time
         }
-        let arr = crate::zarr_reader::meta::open_array(&bind.store, &col.name)?;
+        if !projected.contains_key(&col_idx) {
+            continue; // skip decompression for non-projected data vars
+        }
+        let arr = bind.arrays.get(&col.name)
+            .ok_or_else(|| format!("array '{}' not found in bind cache", col.name))?;
         // ArrayBytes<'static>: zarrs convention for requesting owned decoded bytes.
         // retrieve_chunk fills missing (implicit) chunks with fill_value automatically.
         let raw = arr.retrieve_chunk::<zarrs::array::ArrayBytes<'static>>(&wu.chunk_indices)?;
@@ -261,6 +294,7 @@ fn fill_chunk_slice(
     vector_base: usize,
     chunk_row_start: usize,
     n_rows: usize,
+    projected: &HashMap<usize, usize>,
 ) -> usize {
     let ndim = wu.chunk_indices.len();
 
@@ -292,10 +326,13 @@ fn fill_chunk_slice(
         zarrs_strides[k] = zarrs_strides[k + 1] * zarrs_shape[k + 1];
     }
 
-    let mut dim_col_k = 0usize;
-
     for (col_idx, col_def) in col_defs.iter().enumerate() {
-        let mut vector = output.flat_vector(col_idx);
+        let out_vec_idx = match projected.get(&col_idx) {
+            Some(&i) => i,
+            None => continue,
+        };
+
+        let mut vector = output.flat_vector(out_vec_idx);
 
         for out_i in 0..n_rows {
             let flat_row = chunk_row_start + out_i;
@@ -312,8 +349,7 @@ fn fill_chunk_slice(
             // Physical element index in the zarrs byte buffer (accounting for padding).
             let zarrs_flat: usize = (0..ndim).map(|k| dim_indices[k] * zarrs_strides[k]).sum();
 
-            if col_def.is_coord {
-                let dim_k = dim_col_k;
+            if let Some(dim_k) = col_def.dim_idx {
                 let coord_idx = global_indices[dim_k];
                 if let Some(ca) = coord_arrays.get(&col_def.name) {
                     let elem_size = ca.dtype.byte_size();
@@ -346,13 +382,9 @@ fn fill_chunk_slice(
                         dst,
                     );
                 } else {
-                    vector.set_null(dst);
+                    unreachable!("projected data variable '{}' missing from chunk_bytes", col_def.name);
                 }
             }
-        }
-
-        if col_def.is_coord {
-            dim_col_k += 1;
         }
     }
 
