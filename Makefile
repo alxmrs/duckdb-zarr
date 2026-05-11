@@ -19,6 +19,19 @@ include extension-ci-tools/makefiles/c_api_extensions/rust.Makefile
 
 configure: venv platform extension_version
 
+# DuckDB CI sets CC=gcc/CXX=g++ for windows_amd64_mingw but the Rust default
+# target on Windows is x86_64-pc-windows-msvc (MSVC linker).  cc-rs picks up
+# the ambient CC=gcc and emits GCC COMDAT sections that link.exe rejects (LNK1143).
+# Fix: build for the GNU Windows target instead — same GCC toolchain end-to-end.
+# The CI already installs x86_64-pc-windows-gnu via dtolnay/rust-toolchain@stable.
+# GNU Make expands recipe variables at execution time, so these post-include
+# assignments override the values set in rust.Makefile's else branch.
+ifeq ($(DUCKDB_PLATFORM),windows_amd64_mingw)
+TARGET := x86_64-pc-windows-gnu
+TARGET_INFO := --target $(TARGET)
+TARGET_PATH := ./target/$(TARGET)
+endif
+
 debug: build_extension_library_debug build_extension_with_metadata_debug
 release: build_extension_library_release build_extension_with_metadata_release
 

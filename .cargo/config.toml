@@ -17,11 +17,3 @@ rustflags = []
 
 [env]
 CXXFLAGS_aarch64_apple_darwin = "-isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1"
-# DuckDB CI sets CC=gcc / CXX=g++ for the windows_amd64_mingw build, but the Rust
-# target is still x86_64-pc-windows-msvc (uses link.exe).  cc-rs picks up the
-# ambient CC=gcc and produces GCC COMDAT objects that MSVC's linker rejects
-# (LNK1143).  cc-rs checks CC_<target_underscored> before the generic CC, so
-# these target-specific overrides force cl.exe for C/C++ dependencies (snappy_src
-# via blosc) without affecting the Linux or macOS builds.
-CC_x86_64_pc_windows_msvc = "cl"
-CXX_x86_64_pc_windows_msvc = "cl"
