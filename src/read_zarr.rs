@@ -104,7 +104,7 @@ impl VTab for ReadZarrVTab {
             None => {
                 if dim_groups.len() > 1 {
                     return Err(format!(
-                        "'{store_path}' contains multiple dimension groups ({}) {:?}; use read_zarr(path, dims=[...]) to select one",
+                        "'{store_path}' contains multiple dimension groups ({}) {:?}; use read_zarr(path, dims='[\"time\",\"lat\",\"lon\"]') to select one",
                         dim_groups.len(),
                         dim_groups.iter().map(|g| &g.dims).collect::<Vec<_>>()
                     ).into());
@@ -121,6 +121,9 @@ impl VTab for ReadZarrVTab {
     }
 
     fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
+        let bind = unsafe { &*init.get_bind_data::<ReadZarrBind>() };
+        init.set_max_threads(bind.work_units.len().max(1) as u64);
+
         // DuckDB guarantees output.flat_vector(i) in scan() corresponds to
         // get_column_indices()[i] from init(). Do NOT sort — sorting destroys
         // the positional relationship and scrambles output in JOIN context.

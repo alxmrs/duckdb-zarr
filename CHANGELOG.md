@@ -10,7 +10,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Phase 3 — HTTP/S stores, multi-dim-group selection**
 - HTTP/HTTPS store support via `zarrs_http` (#71)
-- Storage adapter shim: dispatch `s3://`, `gs://`, `az://`, `http(s)://` to DuckDB's filesystem FFI (#19)
 - `read_zarr(path, dims=[...])` named parameter for multi-dim-group selection (#70, #14)
 
 **Phase 2 — Zarr v2, Blosc, replacement scan, projection pushdown**
@@ -68,6 +67,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `ColumnDef.dim_idx: Option<usize>` replaces fragile `dim_col_k` counter in `fill_chunk_slice` (#81)
 
 ### Changed
+- read_zarr dims= named parameter for multi-dim-group selection (#70)
 - Write comprehensive SQL tests mirroring xarray-sql test_sql.py (#124)
 - wire generate_fixtures as Makefile test prerequisite so CI generates zarr fixtures before running tests (#127)
 - Fix rusty_quack remnant in GitHub workflow artifact paths (#123)
