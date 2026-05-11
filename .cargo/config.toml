@@ -2,6 +2,13 @@
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-Ctarget-feature=+crt-static"]
 
+# Rtools42's static MinGW toolchain (used by DuckDB CI for windows_amd64_mingw)
+# does not ship libgcc_eh.a.  panic=abort tells rustc not to link it: Rust panics
+# abort the process instead of unwinding.  Acceptable for this niche build target
+# (tests are skipped for mingw anyway via SKIP_TESTS=1 in base.Makefile).
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "panic=abort"]
+
 # macOS Tahoe (Darwin 25 / SDK 26.x): Apple clang with --target=arm64-apple-macosx
 # drops the C++ stdlib include search path when the SDK is >= 26.  The snappy_src
 # build script (pulled in via blosc) fails with "fatal error: 'string' file not
