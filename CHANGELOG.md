@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+**Phase 3 — HTTP/S stores, multi-dim-group selection**
+- HTTP/HTTPS store support via `zarrs_http` (#71)
+- `read_zarr(path, dims=[...])` named parameter for multi-dim-group selection (#70, #14)
+
 **Phase 2 — Zarr v2, Blosc, replacement scan, projection pushdown**
 - Zarr v2 + Blosc/LZ4 codec support (#66)
 - Replacement scan: bare `.zarr` paths and directories with `zarr.json`/`.zgroup` rewrite to `read_zarr(...)` automatically (#67, #9)
@@ -34,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - fix generate_fixtures.py: set ZARR_V3_EXPERIMENTAL_API=1 for zarr 2.x compatibility on Python 3.10 CI (#130)
 - fix projection pushdown: sort in init() destroys col_idx→out_vec_idx mapping in JOIN context (#129)
 - add h5py to pyproject.toml dependencies (required by h5netcdf for ersstv5 fixture) (#128)
+- Fix dims= named parameter not registered with DuckDB (#122)
 
 - `copy_scalar!` macro used `from_le_bytes` but zarrs returns native-endian bytes (#75)
 - `read_zarr_metadata` paginated scan silently truncated stores with >2048 arrays (#76)
@@ -62,6 +67,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `ColumnDef.dim_idx: Option<usize>` replaces fragile `dim_col_k` counter in `fill_chunk_slice` (#81)
 
 ### Changed
+- read_zarr dims= named parameter for multi-dim-group selection (#70)
 - Write comprehensive SQL tests mirroring xarray-sql test_sql.py (#124)
 - wire generate_fixtures as Makefile test prerequisite so CI generates zarr fixtures before running tests (#127)
 - Fix rusty_quack remnant in GitHub workflow artifact paths (#123)

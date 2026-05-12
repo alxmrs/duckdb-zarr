@@ -44,14 +44,19 @@ unsafe extern "C" fn zarr_replacement_scan(
 }
 
 fn looks_like_zarr(name: &str) -> bool {
-    // Strip trailing slashes for the suffix check.
     let trimmed = name.trim_end_matches('/');
-    let p = Path::new(trimmed);
+    let lower = trimmed.to_ascii_lowercase();
 
-    // Design spec §replacement-scan: two-step probe.
+    // HTTP/HTTPS: trust the .zarr suffix; can't probe the filesystem.
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return lower.ends_with(".zarr");
+    }
+
+    // Design spec §replacement-scan: two-step probe for local paths.
     // Step 1: suffix check (case-insensitive). Step 2: zarr.json/.zgroup stat.
     // Suffix-less paths are NOT probed — that would stat every SQL identifier.
-    if trimmed.to_ascii_lowercase().ends_with(".zarr") {
+    if lower.ends_with(".zarr") {
+        let p = Path::new(trimmed);
         return p.join("zarr.json").exists() || p.join(".zgroup").exists();
     }
 

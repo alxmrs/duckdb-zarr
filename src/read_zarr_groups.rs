@@ -43,7 +43,7 @@ impl VTab for ReadZarrGroupsVTab {
 
         let store_path = bind.get_parameter(0).to_string();
         let store = open_store(&store_path)?;
-        let array_names = list_array_names(&store_path)?;
+        let array_names = list_array_names(&store_path, &store)?;
         let (dim_groups, _) = infer_dim_groups(&store, &array_names)?;
 
         let rows = dim_groups

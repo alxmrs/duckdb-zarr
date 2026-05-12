@@ -213,6 +213,30 @@ SELECT COUNT(*) FROM read_zarr_groups('test/fixtures/xarray_tutorial/multi_dim_g
 ----
 2
 
+# dims= selects the surface group (time, lat, lon): 4*5*8 = 160 rows.
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr', dims='["time","lat","lon"]');
+----
+160
+
+# dims= selects the atmosphere group (time, level, lat, lon): 4*3*5*8 = 480 rows.
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr', dims='["time","level","lat","lon"]');
+----
+480
+
+# dims= also accepts comma-separated form.
+query I
+SELECT COUNT(*) FROM read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr', dims='time,lat,lon');
+----
+160
+
+# dims= with no match → error.
+statement error
+SELECT * FROM read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr', dims='["x","y"]') LIMIT 1;
+----
+no dimension group matches
+
 # ── air_temperature_gradient ─────────────────────────────────────────────────
 # Mismatched chunk shapes within one dim group → bind error.
 
@@ -299,6 +323,7 @@ query I
 SELECT COUNT(DISTINCT lon) FROM read_zarr('test/fixtures/xarray_tutorial/blosc_multichunk.zarr');
 ----
 12
+
 
 
 # ── projection_pushdown ───────────────────────────────────────────────────────

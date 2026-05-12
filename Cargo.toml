@@ -36,6 +36,14 @@ zarrs = { version = "0.23", default-features = false, features = [
 ndarray = "0.17"
 serde_json = "1"
 base64 = "0.22"
+zarrs_http = "0.3.1"
+
+# zarrs_http → reqwest → native-tls → openssl-sys. On Linux the DuckDB CI sets
+# OPENSSL_DIR to a vcpkg path that doesn't exist. Vendored mode compiles OpenSSL
+# from source and ignores OPENSSL_DIR entirely. macOS and Windows provide TLS via
+# Security.framework / SChannel, so vendoring is unnecessary there.
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
 
 # Enable blosc everywhere except x86_64-pc-windows-gnu (Rtools42/mingw).
 # SKIP_TESTS=1 for that target so blosc is never exercised there in CI.

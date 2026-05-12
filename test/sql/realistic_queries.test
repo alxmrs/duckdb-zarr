@@ -258,29 +258,27 @@ CROSS JOIN
 72
 
 # Inner join: pair surface (t2m) with atmosphere (temp) at 1000 hPa.
-# Skipped: dims= named parameter not available in this branch.
-# query I
-# SELECT COUNT(*) FROM
-#     read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr', dims='["time","lat","lon"]') s
-# JOIN
-#     read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr', dims='["time","level","lat","lon"]') a
-# ON s.time = a.time AND s.lat = a.lat AND s.lon = a.lon
-# WHERE a.level = 1000.0;
-# ----
-# 160
+query I
+SELECT COUNT(*) FROM
+    read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr', dims='["time","lat","lon"]') s
+JOIN
+    read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr', dims='["time","level","lat","lon"]') a
+ON s.time = a.time AND s.lat = a.lat AND s.lon = a.lon
+WHERE a.level = 1000.0;
+----
+160
 
 # Both t2m (surface) and temp (atmosphere) columns accessible in the joined result.
-# Skipped: dims= named parameter not available in this branch.
-# query I
-# SELECT COUNT(*) FROM (
-#     SELECT s.t2m, a.temp
-#     FROM read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr', dims='["time","lat","lon"]') s
-#     JOIN read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr', dims='["time","level","lat","lon"]') a
-#     ON s.time = a.time AND s.lat = a.lat AND s.lon = a.lon
-#     WHERE a.level = 1000.0
-# );
-# ----
-# 160
+query I
+SELECT COUNT(*) FROM (
+    SELECT s.t2m, a.temp
+    FROM read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr', dims='["time","lat","lon"]') s
+    JOIN read_zarr('test/fixtures/xarray_tutorial/multi_dim_group.zarr', dims='["time","level","lat","lon"]') a
+    ON s.time = a.time AND s.lat = a.lat AND s.lon = a.lon
+    WHERE a.level = 1000.0
+);
+----
+160
 
 # ── 9. Time-axis queries ─────────────────────────────────────────────────────
 # Mirror: TestCftimeGregorianLike
