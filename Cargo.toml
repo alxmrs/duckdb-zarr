@@ -32,7 +32,6 @@ duckdb = { version = "=1.10502.0", features = ["loadable-extension"] }
 zarrs = { version = "0.23", default-features = false, features = [
     "ndarray",
     "filesystem",
-    "blosc",
     "gzip",
     "zstd",
     "crc32c",
