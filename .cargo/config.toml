@@ -2,13 +2,25 @@
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-Ctarget-feature=+crt-static"]
 
+# Rtools42's static MinGW toolchain (used by DuckDB CI for windows_amd64_mingw)
+# does not ship libgcc_eh.a.  panic=abort tells rustc not to link it: Rust panics
+# abort the process instead of unwinding.  Acceptable for this niche build target
+# (tests are skipped for mingw anyway via SKIP_TESTS=1 in base.Makefile).
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "panic=abort"]
+
 # macOS Tahoe (Darwin 25 / SDK 26.x): Apple clang with --target=arm64-apple-macosx
 # drops the C++ stdlib include search path when the SDK is >= 26.  The snappy_src
 # build script (pulled in via blosc) fails with "fatal error: 'string' file not
-# found" unless we restore the path explicitly.  Using the stable MacOSX.sdk
-# symlink so this survives minor SDK updates.
+# found" unless we restore the path explicitly.  We use -isysroot so the C stdlib
+# headers (stdlib.h, wchar.h, etc.) are also found from the same SDK — without it,
+# the libc++ wrappers silently lose symbols via _LIBCPP_USING_IF_EXISTS, producing
+# "unknown type name 'ldiv_t'" and similar errors when SDKROOT is unset (e.g. CI).
+# Using the stable MacOSX.sdk symlink so this survives minor SDK updates.
+# cc-rs reads CXXFLAGS_<triple_underscored> before the generic CXXFLAGS, so this
+# is scoped to aarch64-apple-darwin and does not bleed into Linux builds.
 [target.aarch64-apple-darwin]
 rustflags = []
 
 [env]
-CXXFLAGS = "-I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1"
+CXXFLAGS_aarch64_apple_darwin = "-isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1"

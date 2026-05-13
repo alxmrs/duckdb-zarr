@@ -402,12 +402,19 @@ pub fn infer_dim_groups(
 
         let entry = groups.entry(dims.clone()).or_insert_with(|| DimGroup {
             dims,
-            shape,
+            shape: shape.clone(),
             chunk_shape: chunk_shape.clone(),
             data_var_names: Vec::new(),
             coord_var_names: group_coord_names,
         });
-        // Validate chunk shape consistency within the dim group.
+        // Validate shape and chunk shape consistency within the dim group.
+        if entry.shape != shape {
+            return Err(format!(
+                "array shape mismatch in dim group {:?}: existing {:?} vs '{var_name}' {:?}",
+                entry.dims, entry.shape, shape
+            )
+            .into());
+        }
         if entry.chunk_shape != chunk_shape {
             return Err(format!(
                 "chunk shape mismatch in dim group {:?}: existing {:?} vs '{var_name}' {:?}",

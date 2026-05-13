@@ -1,7 +1,7 @@
 [project]
 name = "duckdb-zarr"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "duckdb",
     "numpy",
@@ -9,6 +9,7 @@ dependencies = [
     "zarr",
     "scipy",
     "h5netcdf",
+    "h5py",
     "pooch",
     "zstandard",
 ]
