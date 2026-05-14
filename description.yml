@@ -2,10 +2,9 @@ extension:
   name: duckdb_zarr
   description: Query Zarr array stores (v2 and v3) with SQL — read xarray-convention datasets as tables
   version: 0.1.0
-  language: C++
-  build: cmake
+  language: Rust
+  build: cargo
   license: MIT
-  requires_toolchains: rust
   maintainers:
     - alxmrs
 
@@ -46,4 +45,6 @@ docs:
     - Zarr v2 and v3
     - Codecs: gzip, zstd, blosc, crc32c, sharding, transpose, bytes (big/little endian)
     - CF conventions: `scale_factor`/`add_offset` packed integers, `_FillValue`/`missing_value` null masking
-    - Local filesystem and HTTP/HTTPS (consolidated metadata required for HTTP array listing)
+    - Local filesystem, HTTP/HTTPS, S3, GCS, and Azure Blob Storage
+      (consolidated metadata required for remote array listing; S3/GCS/Azure credentials
+      are read from DuckDB's secrets manager — `CREATE SECRET ... TYPE S3` etc.)
